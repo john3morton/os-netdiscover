@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<menu>
+  <Services>
+    <NetDiscover VisibleName="NetDiscover" cssClass="fa fa-network-wired" order="140">
+      <Inventory VisibleName="Inventory" url="/ui/netdiscover/" order="5"/>
+      <Changes VisibleName="Recent Changes" url="/ui/netdiscover/#changes" order="7"/>
+      <Settings VisibleName="Settings" url="/ui/netdiscover/#settings" order="10"/>
+    </NetDiscover>
+  </Services>
+</menu>

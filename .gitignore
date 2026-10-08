@@ -1,0 +1,25 @@
+# OPNsense plugin build artifacts
+work/
+archive/
+*.pkg
+*.txz
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local secrets / env
+.env
+.env.*

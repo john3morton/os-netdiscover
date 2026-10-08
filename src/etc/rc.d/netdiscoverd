@@ -1,0 +1,111 @@
+#!/bin/sh
+# PROVIDE: netdiscoverd
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+. /etc/rc.subr
+
+name="netdiscoverd"
+rcvar="netdiscoverd_enable"
+command="/usr/local/opnsense/scripts/NetDiscover/netdiscoverd.py"
+pidfile="/var/run/${name}.pid"
+
+: ${netdiscoverd_enable:="NO"}
+: ${netdiscoverd_interval:="300"}
+: ${netdiscoverd_active:="NO"}
+: ${netdiscoverd_reverse_dns:="YES"}
+: ${netdiscoverd_interfaces:=""}
+: ${netdiscoverd_max_hosts:="4096"}
+: ${netdiscoverd_rate_limit_ms:="3"}
+: ${netdiscoverd_ssdp_enable:="YES"}
+: ${netdiscoverd_ssdp_fetch_xml:="YES"}
+: ${netdiscoverd_ssdp_xml_rate_limit:="10"}
+: ${netdiscoverd_mdns_enable:="YES"}
+: ${netdiscoverd_llmnr_enable:="YES"}
+: ${netdiscoverd_nbns_enable:="YES"}
+: ${netdiscoverd_tcp_probe_enable:="NO"}
+: ${netdiscoverd_tcp_probe_ports:="22,80,443,445,3389,9100"}
+: ${netdiscoverd_tcp_probe_timeout_ms:="250"}
+: ${netdiscoverd_snmp_enable:="NO"}
+: ${netdiscoverd_snmp_communities:="public"}
+: ${netdiscoverd_snmp_timeout_ms:="400"}
+: ${netdiscoverd_snmp_rate_limit:="3600"}
+
+reverse_flag=""
+[ "${netdiscoverd_reverse_dns}" = "YES" ] && reverse_flag="--reverse-dns"
+
+ssdp_flag=""
+[ "${netdiscoverd_ssdp_enable}" = "YES" ] && ssdp_flag="--ssdp"
+
+ssdp_xml_flag=""
+[ "${netdiscoverd_ssdp_fetch_xml}" = "YES" ] && ssdp_xml_flag="--ssdp-fetch-xml"
+
+mdns_flag=""
+[ "${netdiscoverd_mdns_enable}" = "YES" ] && mdns_flag="--mdns"
+
+llmnr_flag=""
+[ "${netdiscoverd_llmnr_enable}" = "YES" ] && llmnr_flag="--llmnr"
+
+nbns_flag=""
+[ "${netdiscoverd_nbns_enable}" = "YES" ] && nbns_flag="--nbns"
+
+tcp_flag=""
+[ "${netdiscoverd_tcp_probe_enable}" = "YES" ] && tcp_flag="--tcp-probe"
+
+snmp_flag=""
+[ "${netdiscoverd_snmp_enable}" = "YES" ] && snmp_flag="--snmp"
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+
+netdiscoverd_start()
+{
+    if checkyesno netdiscoverd_enable; then
+        echo "Starting ${name}..."
+        set -- --interval "${netdiscoverd_interval}"
+        [ "${netdiscoverd_active}" = "YES" ] && set -- "$@" --active
+        [ -n "${reverse_flag}" ] && set -- "$@" ${reverse_flag}
+        set -- "$@" --interfaces "${netdiscoverd_interfaces}" \
+            --max-hosts "${netdiscoverd_max_hosts}" \
+            --rate-limit-ms "${netdiscoverd_rate_limit_ms}"
+        [ -n "${ssdp_flag}" ] && set -- "$@" ${ssdp_flag}
+        [ -n "${ssdp_xml_flag}" ] && set -- "$@" ${ssdp_xml_flag}
+        set -- "$@" --ssdp-xml-rate-limit "${netdiscoverd_ssdp_xml_rate_limit}"
+        [ -n "${mdns_flag}" ] && set -- "$@" ${mdns_flag}
+        [ -n "${llmnr_flag}" ] && set -- "$@" ${llmnr_flag}
+        [ -n "${nbns_flag}" ] && set -- "$@" ${nbns_flag}
+        [ -n "${tcp_flag}" ] && set -- "$@" ${tcp_flag}
+        set -- "$@" --tcp-ports "${netdiscoverd_tcp_probe_ports}" \
+            --tcp-timeout-ms "${netdiscoverd_tcp_probe_timeout_ms}"
+        [ -n "${snmp_flag}" ] && set -- "$@" ${snmp_flag}
+        set -- "$@" --snmp-communities "${netdiscoverd_snmp_communities}" \
+            --snmp-timeout-ms "${netdiscoverd_snmp_timeout_ms}" \
+            --snmp-rate-limit "${netdiscoverd_snmp_rate_limit}"
+
+        /usr/sbin/daemon -P ${pidfile} -r -f ${command} "$@"
+    else
+        echo "${name} is disabled (netdiscoverd_enable=NO)"
+    fi
+}
+
+netdiscoverd_stop()
+{
+    echo "Stopping ${name}..."
+    if [ -f ${pidfile} ]; then
+        kill "$(cat ${pidfile})" 2>/dev/null || true
+        rm -f ${pidfile}
+    fi
+}
+
+netdiscoverd_status()
+{
+    if [ -f ${pidfile} ]; then
+        echo "${name} running (pid $(cat ${pidfile}))"
+        exit 0
+    fi
+    echo "${name} not running"
+    exit 1
+}
+
+load_rc_config ${name}
+run_rc_command "$1"

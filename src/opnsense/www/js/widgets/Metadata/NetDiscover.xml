@@ -1,0 +1,13 @@
+<metadata>
+    <netdiscover>
+        <filename>NetDiscoverWidget.js</filename>
+        <endpoints>
+            <endpoint>/api/netdiscover/dashboard/*</endpoint>
+        </endpoints>
+        <translations>
+            <title>NetDiscover</title>
+            <description>Device discovery summary (new/changed/gone) + recent events</description>
+        </translations>
+    </netdiscover>
+</metadata>
+

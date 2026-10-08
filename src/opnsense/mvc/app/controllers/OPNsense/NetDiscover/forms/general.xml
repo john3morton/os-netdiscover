@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<form>
+  <field><id>general.enabled</id><label>Enable NetDiscover</label><type>checkbox</type></field>
+  <field><id>general.interval</id><label>Scan interval (seconds)</label><type>text</type>
+    <help>Default: 300</help></field>
+
+  <field><id>general.active_scan</id><label>Active scan (ping sweep)</label><type>checkbox</type></field>
+  <field><id>general.reverse_dns</id><label>Reverse DNS enrichment (PTR)</label><type>checkbox</type></field>
+
+  <field><id>general.interfaces</id><label>Interfaces (optional)</label><type>text</type>
+    <help>Default: _LAN_. Comma-separated; blank = all.</help></field>
+
+  <field><id>general.max_hosts</id><label>Max hosts per subnet (active scan)</label><type>text</type>
+    <help>Default: 4096</help></field>
+  <field><id>general.rate_limit_ms</id><label>Ping rate limit (ms)</label><type>text</type>
+    <help>Default: 3</help></field>
+
+  <field><id>general.ssdp_enable</id><label>Enable SSDP/UPnP discovery</label><type>checkbox</type></field>
+  <field><id>general.ssdp_fetch_xml</id><label>Fetch UPnP description XML (friendlyName/manufacturer/model)</label><type>checkbox</type></field>
+  <field><id>general.ssdp_xml_rate_limit</id><label>UPnP XML fetch rate limit (seconds per device)</label><type>text</type>
+    <help>Default: 10</help></field>
+
+  <field><id>general.mdns_enable</id><label>Enable mDNS (Bonjour) discovery</label><type>checkbox</type></field>
+  <field><id>general.llmnr_enable</id><label>Enable LLMNR name discovery</label><type>checkbox</type></field>
+  <field><id>general.nbns_enable</id><label>Enable NetBIOS (NBNS) name discovery</label><type>checkbox</type></field>
+
+  <field><id>general.tcp_probe_enable</id><label>Enable TCP probes (fast port check)</label><type>checkbox</type></field>
+  <field><id>general.tcp_probe_ports</id><label>Probe ports (comma-separated)</label><type>text</type>
+    <help>Default: 22,80,443,445,3389,9100</help></field>
+  <field><id>general.tcp_probe_timeout_ms</id><label>Probe timeout (ms)</label><type>text</type>
+    <help>Default: 250</help></field>
+
+  <field><id>general.snmp_enable</id><label>Enable SNMP enrichment (sysName/sysDescr)</label><type>checkbox</type></field>
+  <field><id>general.snmp_communities</id><label>SNMP communities (comma-separated)</label><type>text</type>
+    <help>Example: public,private. Uses snmpget if installed.</help></field>
+  <field><id>general.snmp_timeout_ms</id><label>SNMP timeout (ms)</label><type>text</type>
+    <help>Default: 400</help></field>
+  <field><id>general.snmp_rate_limit</id><label>SNMP rate limit per device (seconds)</label><type>text</type>
+    <help>Default: 3600</help></field>
+</form>

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<acl>
+  <page>
+    <NetDiscover>
+      <page>services</page>
+      <name>NetDiscover</name>
+      <url>/ui/netdiscover/</url>
+    </NetDiscover>
+  </page>
+</acl>

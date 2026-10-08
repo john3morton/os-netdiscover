@@ -1,0 +1,48 @@
+@dir /usr/local/opnsense/scripts/NetDiscover
+@dir /usr/local/opnsense/service/templates/OPNsense/NetDiscover
+@dir /usr/local/opnsense/www/js/netdiscover
+@dir /usr/local/opnsense/www/js/widgets
+@dir /usr/local/opnsense/www/js/widgets/Metadata
+
+@mode 0755
+/usr/local/opnsense/scripts/NetDiscover/netdiscoverd.py
+/usr/local/opnsense/scripts/NetDiscover/db_helper.py
+/usr/local/opnsense/scripts/NetDiscover/db_schema.sql
+/usr/local/opnsense/scripts/NetDiscover/oui_schema.sql
+/usr/local/opnsense/scripts/NetDiscover/device_patterns.py
+/usr/local/opnsense/scripts/NetDiscover/dhcp_analyzer.py
+/usr/local/opnsense/scripts/NetDiscover/port_scanner.py
+/usr/local/opnsense/scripts/NetDiscover/ap_detector.py
+/usr/local/opnsense/scripts/NetDiscover/ap_syslog_parser.py
+/usr/local/opnsense/scripts/NetDiscover/migrate_to_sqlite.py
+/usr/local/opnsense/scripts/NetDiscover/update_oui.py
+/usr/local/opnsense/scripts/NetDiscover/update_wireshark_manuf.py
+/usr/local/opnsense/scripts/NetDiscover/check_status.sh
+/usr/local/etc/rc.d/netdiscoverd
+@mode
+/usr/local/opnsense/scripts/NetDiscover/oui_sample.csv
+@exec /bin/chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/netdiscoverd.py
+/usr/local/opnsense/service/conf/actions.d/actions_netdiscover.conf
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/IndexController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/SettingsController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/ServiceController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/InventoryController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/OverridesController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/ScanController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/AcknowledgeController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/DashboardController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/EventsController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/ExportController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/HistoryController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/forms/general.xml
+/usr/local/opnsense/mvc/app/models/OPNsense/NetDiscover/NetDiscover.xml
+/usr/local/opnsense/mvc/app/models/OPNsense/NetDiscover/NetDiscover.php
+/usr/local/opnsense/mvc/app/models/OPNsense/NetDiscover/Menu/Menu.xml
+/usr/local/opnsense/mvc/app/models/OPNsense/NetDiscover/ACL/ACL.xml
+/usr/local/opnsense/mvc/app/views/OPNsense/NetDiscover/index.volt
+/usr/local/opnsense/www/js/netdiscover/app.js
+/usr/local/opnsense/www/js/widgets/NetDiscoverWidget.js
+/usr/local/opnsense/www/js/widgets/Metadata/NetDiscover.xml
+
+/usr/local/opnsense/service/templates/OPNsense/NetDiscover/+TARGETS
+/usr/local/opnsense/service/templates/OPNsense/NetDiscover/rc.conf.d

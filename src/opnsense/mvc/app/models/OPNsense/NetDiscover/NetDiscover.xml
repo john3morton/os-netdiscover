@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<model>
+  <mount>/OPNsense/NetDiscover</mount>
+  <version>2.0.13</version>
+  <description>NetDiscover Settings</description>
+  <items>
+    <general>
+      <enabled type="BooleanField"><default>0</default><Required>Y</Required></enabled>
+      <interval type="IntegerField"><default>300</default><MinimumValue>30</MinimumValue><MaximumValue>86400</MaximumValue><Required>Y</Required></interval>
+
+      <active_scan type="BooleanField"><default>0</default><Required>Y</Required></active_scan>
+      <reverse_dns type="BooleanField"><default>1</default><Required>Y</Required></reverse_dns>
+
+      <interfaces type="TextField"><default></default><Required>N</Required></interfaces>
+
+      <max_hosts type="IntegerField"><default>4096</default><MinimumValue>256</MinimumValue><MaximumValue>65536</MaximumValue><Required>Y</Required></max_hosts>
+      <rate_limit_ms type="IntegerField"><default>3</default><MinimumValue>0</MinimumValue><MaximumValue>200</MaximumValue><Required>Y</Required></rate_limit_ms>
+
+      <ssdp_enable type="BooleanField"><default>1</default><Required>Y</Required></ssdp_enable>
+      <ssdp_fetch_xml type="BooleanField"><default>1</default><Required>Y</Required></ssdp_fetch_xml>
+      <ssdp_xml_rate_limit type="IntegerField"><default>10</default><MinimumValue>1</MinimumValue><MaximumValue>300</MaximumValue><Required>Y</Required></ssdp_xml_rate_limit>
+
+      <mdns_enable type="BooleanField"><default>1</default><Required>Y</Required></mdns_enable>
+      <llmnr_enable type="BooleanField"><default>1</default><Required>Y</Required></llmnr_enable>
+      <nbns_enable type="BooleanField"><default>1</default><Required>Y</Required></nbns_enable>
+
+      <tcp_probe_enable type="BooleanField"><default>0</default><Required>Y</Required></tcp_probe_enable>
+      <tcp_probe_ports type="TextField"><default>22,80,443,445,3389,9100</default><Required>N</Required></tcp_probe_ports>
+      <tcp_probe_timeout_ms type="IntegerField"><default>250</default><MinimumValue>50</MinimumValue><MaximumValue>3000</MaximumValue><Required>Y</Required></tcp_probe_timeout_ms>
+
+      <snmp_enable type="BooleanField"><default>0</default><Required>Y</Required></snmp_enable>
+      <snmp_communities type="TextField"><default>public</default><Required>N</Required></snmp_communities>
+      <snmp_timeout_ms type="IntegerField"><default>400</default><MinimumValue>100</MinimumValue><MaximumValue>3000</MaximumValue><Required>Y</Required></snmp_timeout_ms>
+      <snmp_rate_limit type="IntegerField"><default>3600</default><MinimumValue>60</MinimumValue><MaximumValue>86400</MaximumValue><Required>Y</Required></snmp_rate_limit>
+    </general>
+  </items>
+</model>

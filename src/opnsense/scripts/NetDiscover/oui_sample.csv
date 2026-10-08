@@ -1,0 +1,4 @@
+# Minimal sample. Replace with a full IEEE OUI list if you want vendor mapping.
+# Format: OUI,Vendor
+58:9C:FC,ExampleVendor
+8C:85:C1,ExampleVendor2
