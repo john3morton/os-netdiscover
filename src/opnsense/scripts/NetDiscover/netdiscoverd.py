@@ -1,5 +1,5 @@
 #!/usr/local/bin/python3
-# NetDiscover v1.3.4
+# NetDiscover v2.1.0 — device identity keyed by MAC
 
 import sys
 import os
@@ -61,6 +61,18 @@ try:
     HAS_SYSLOG_PARSER = True
 except ImportError:
     HAS_SYSLOG_PARSER = False
+
+try:
+    from alerts import send_alerts
+    HAS_ALERTS = True
+except ImportError:
+    HAS_ALERTS = False
+
+try:
+    from auto_tags import apply_auto_tags
+    HAS_AUTO_TAGS = True
+except ImportError:
+    HAS_AUTO_TAGS = False
 
 import argparse
 import json
@@ -152,205 +164,471 @@ def save_json(path: str, data):
         json.dump(data, f, indent=2, sort_keys=True)
     os.replace(tmp, path)
 
-def init_sqlite_db():
-    """Initialize SQLite database with schema"""
-    conn = sqlite3.connect(DB_FILE)
+def normalize_mac(mac: str) -> str:
+    """Normalize MAC to lowercase colon-separated form; empty if invalid/missing."""
+    if not mac:
+        return ""
+    m = str(mac).strip().lower().replace("-", ":")
+    parts = [p for p in m.split(":") if p != ""]
+    if len(parts) != 6:
+        return m if m.startswith("ip:") else ""
+    try:
+        return ":".join(f"{int(p, 16):02x}" for p in parts)
+    except ValueError:
+        return ""
+
+def device_key(mac: str, ip: str) -> str:
+    """Stable device identity: real MAC, or synthetic ip:<addr> when MAC unknown."""
+    m = normalize_mac(mac)
+    if m:
+        return m
+    if ip:
+        return f"ip:{ip}"
+    return ""
+
+def _devices_pk_is_mac(cur) -> bool:
+    cur.execute("PRAGMA table_info(devices)")
+    rows = cur.fetchall()
+    if not rows:
+        return False
+    pk_cols = [r[1] for r in rows if r[5]]
+    return pk_cols == ["mac"]
+
+def _override_pk_is_mac(cur) -> bool:
+    cur.execute("PRAGMA table_info(device_overrides)")
+    rows = cur.fetchall()
+    pk_cols = [r[1] for r in rows if r[5]]
+    return pk_cols == ["mac"]
+
+def _merge_device_rows(rows: List[Dict]) -> Dict:
+    """Pick newest row by last_seen; keep earliest first_seen; fill empty fields from others."""
+    best = max(rows, key=lambda r: int(r.get("last_seen") or 0))
+    merged = dict(best)
+    first_vals = [int(r.get("first_seen") or 0) for r in rows if r.get("first_seen")]
+    if first_vals:
+        merged["first_seen"] = min(first_vals)
+    ordered = sorted(rows, key=lambda r: int(r.get("last_seen") or 0), reverse=True)
+    fill_keys = [
+        "hostname", "vendor", "connection_state", "lifecycle_flags", "status", "dhcp_type",
+        "device_type", "device_type_source", "device_category", "manufacturer", "model", "os",
+        "os_version", "discovered_manufacturer", "discovered_model", "discovered_os",
+        "snmp_sysname", "snmp_sysdescr", "interface", "subnet", "notes",
+        "connected_to_ap", "ap_name", "exhaustive_ports", "mdns_services", "open_ports",
+        "banners", "tags",
+    ]
+    for k in fill_keys:
+        if merged.get(k):
+            continue
+        for r in ordered:
+            if r.get(k):
+                merged[k] = r[k]
+                break
+    if any(int(r.get("flag_acknowledged") or 0) for r in rows):
+        merged["flag_acknowledged"] = 1
+    return merged
+
+def migrate_devices_to_mac_pk(conn) -> bool:
+    """Rebuild devices/overrides with MAC primary key; dedupe IP-keyed duplicates."""
     cur = conn.cursor()
-    
-    # Check if devices table exists
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='devices'")
-    table_exists = cur.fetchone() is not None
-    
-    # Devices table
+    if not cur.fetchone():
+        return False
+    if _devices_pk_is_mac(cur):
+        return False
+
+    log_error("Migrating devices table from IP primary key to MAC primary key...")
+    cur.execute("ALTER TABLE devices RENAME TO devices_ip_legacy")
+
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS devices (
-            ip TEXT PRIMARY KEY,
-            mac TEXT,
+        CREATE TABLE devices (
+            mac TEXT PRIMARY KEY,
+            ip TEXT,
             hostname TEXT,
             hostname_override INTEGER DEFAULT 0,
             vendor TEXT,
+            connection_state TEXT DEFAULT 'online',
+            lifecycle_flags TEXT,
             status TEXT,
+            dhcp_type TEXT,
             device_type TEXT,
+            device_type_source TEXT,
+            device_category TEXT,
             tags TEXT,
+            discovered_manufacturer TEXT,
+            discovered_model TEXT,
+            discovered_os TEXT,
             manufacturer TEXT,
             model TEXT,
+            os TEXT,
+            os_version TEXT,
+            exhaustive_ports TEXT,
+            exhaustive_ports_time INTEGER,
             mdns_services TEXT,
             open_ports TEXT,
+            banners TEXT,
             snmp_sysname TEXT,
             snmp_sysdescr TEXT,
             interface TEXT,
             subnet TEXT,
             first_seen INTEGER,
             last_seen INTEGER,
+            flag_set_time INTEGER,
+            flag_acknowledged INTEGER DEFAULT 0,
+            connected_to_ap TEXT,
+            ap_name TEXT,
+            ap_last_seen INTEGER,
             notes TEXT,
+            created_at INTEGER,
             updated_at INTEGER
         )
     ''')
-    
-    # Device history table
+
+    # Ensure history can store mac before inserts during migration
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='device_history'")
+    if cur.fetchone():
+        cur.execute("PRAGMA table_info(device_history)")
+        hcols = {r[1] for r in cur.fetchall()}
+        if "mac" not in hcols:
+            cur.execute("ALTER TABLE device_history ADD COLUMN mac TEXT")
+    else:
+        cur.execute('''
+            CREATE TABLE device_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac TEXT,
+                ip TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                field_name TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                details TEXT
+            )
+        ''')
+
+    cur.execute("SELECT * FROM devices_ip_legacy")
+    legacy_rows = [dict(r) for r in cur.fetchall()]
+    groups: Dict[str, List[Dict]] = {}
+    ip_to_key: Dict[str, str] = {}
+    for row in legacy_rows:
+        key = device_key(row.get("mac") or "", row.get("ip") or "")
+        if not key:
+            continue
+        groups.setdefault(key, []).append(row)
+        if row.get("ip"):
+            ip_to_key[row["ip"]] = key
+
+    now = int(time.time())
+    for key, group in groups.items():
+        m = _merge_device_rows(group)
+        cur.execute('''
+            INSERT OR REPLACE INTO devices (
+                mac, ip, hostname, hostname_override, vendor,
+                connection_state, lifecycle_flags, status, dhcp_type,
+                device_type, device_type_source, device_category, tags,
+                discovered_manufacturer, discovered_model, discovered_os,
+                manufacturer, model, os, os_version,
+                exhaustive_ports, exhaustive_ports_time,
+                mdns_services, open_ports, banners,
+                snmp_sysname, snmp_sysdescr, interface, subnet,
+                first_seen, last_seen, flag_set_time, flag_acknowledged,
+                connected_to_ap, ap_name, ap_last_seen, notes,
+                created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ''', (
+            key, m.get("ip") or "", m.get("hostname") or "", int(m.get("hostname_override") or 0),
+            m.get("vendor") or "", m.get("connection_state") or "online", m.get("lifecycle_flags") or "",
+            m.get("status") or "", m.get("dhcp_type") or "unknown", m.get("device_type") or "",
+            m.get("device_type_source") or "", m.get("device_category") or "", m.get("tags") or "[]",
+            m.get("discovered_manufacturer") or "", m.get("discovered_model") or "", m.get("discovered_os") or "",
+            m.get("manufacturer") or "", m.get("model") or "", m.get("os") or "", m.get("os_version") or "",
+            m.get("exhaustive_ports") or "", m.get("exhaustive_ports_time"),
+            m.get("mdns_services") or "[]", m.get("open_ports") or "[]", m.get("banners") or "{}",
+            m.get("snmp_sysname") or "", m.get("snmp_sysdescr") or "", m.get("interface") or "",
+            m.get("subnet") or "", int(m.get("first_seen") or now), int(m.get("last_seen") or now),
+            m.get("flag_set_time"), int(m.get("flag_acknowledged") or 0),
+            m.get("connected_to_ap") or "", m.get("ap_name") or "", m.get("ap_last_seen") or 0,
+            m.get("notes") or "", m.get("created_at") or now, now
+        ))
+        current_ip = m.get("ip") or ""
+        for r in group:
+            old_ip = r.get("ip") or ""
+            if old_ip and old_ip != current_ip:
+                cur.execute('''
+                    INSERT INTO device_history (mac, ip, timestamp, event_type, field_name, old_value, new_value, details)
+                    VALUES (?, ?, ?, 'attribute_change', 'ip', ?, ?, ?)
+                ''', (key, current_ip, now, old_ip, current_ip,
+                      json.dumps({"reason": "mac_pk_migration_dedupe"})))
+
+    cur.execute("DROP TABLE devices_ip_legacy")
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='device_overrides'")
+    if cur.fetchone():
+        if not _override_pk_is_mac(cur):
+            cur.execute("ALTER TABLE device_overrides RENAME TO device_overrides_ip_legacy")
+            cur.execute('''
+                CREATE TABLE device_overrides (
+                    mac TEXT PRIMARY KEY,
+                    ip TEXT,
+                    hostname TEXT,
+                    device_type TEXT,
+                    manufacturer TEXT,
+                    model TEXT,
+                    os TEXT,
+                    location TEXT,
+                    tags TEXT,
+                    notes TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+            ''')
+            cur.execute("SELECT * FROM device_overrides_ip_legacy")
+            for row in cur.fetchall():
+                rd = dict(row)
+                ip = rd.get("ip") or ""
+                key = ip_to_key.get(ip) or device_key("", ip)
+                if not key:
+                    continue
+                cur.execute('''
+                    INSERT OR REPLACE INTO device_overrides
+                    (mac, ip, hostname, device_type, manufacturer, model, os, location, tags, notes, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    key, ip, rd.get("hostname"), rd.get("device_type"), rd.get("manufacturer"),
+                    rd.get("model"), rd.get("os"), rd.get("location"), rd.get("tags"), rd.get("notes"),
+                    rd.get("created_at") or now, now
+                ))
+            cur.execute("DROP TABLE device_overrides_ip_legacy")
+
+    for ip, key in ip_to_key.items():
+        cur.execute("UPDATE device_history SET mac = ? WHERE (mac IS NULL OR mac = '') AND ip = ?", (key, ip))
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_history_mac ON device_history(mac, timestamp DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_overrides_ip ON device_overrides(ip)")
+
+    cur.execute("DROP VIEW IF EXISTS devices_with_overrides")
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS device_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            field_name TEXT,
-            old_value TEXT,
-            new_value TEXT,
-            details TEXT
-        )
+        CREATE VIEW devices_with_overrides AS
+        SELECT d.*, o.hostname AS override_hostname, o.device_type AS override_device_type,
+               o.tags AS override_tags, o.notes AS override_notes,
+               CASE WHEN o.mac IS NOT NULL THEN 1 ELSE 0 END AS has_override
+        FROM devices d
+        LEFT JOIN device_overrides o ON d.mac = o.mac
     ''')
-    
-    # Events table
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            ip TEXT NOT NULL,
-            mac TEXT,
-            hostname TEXT,
-            details TEXT
-        )
-    ''')
-    
-    # Indexes
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_history_ip ON device_history(ip, timestamp DESC)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC)')
-    
-    # Auto-migrate: Add missing columns if table already existed
-    if table_exists:
-        # Get existing columns
+
+    log_error(f"MAC primary-key migration complete: {len(groups)} devices from {len(legacy_rows)} IP rows")
+    return True
+
+def init_sqlite_db():
+    """Initialize SQLite database with schema; migrate IP-keyed DBs to MAC PK."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='devices'")
+    table_exists = cur.fetchone() is not None
+
+    if table_exists and not _devices_pk_is_mac(cur):
+        migrate_devices_to_mac_pk(conn)
+    else:
+        schema_path = "/usr/local/opnsense/scripts/NetDiscover/db_schema.sql"
+        if os.path.exists(schema_path):
+            with open(schema_path, "r", encoding="utf-8") as f:
+                conn.executescript(f.read())
+        else:
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS devices (
+                    mac TEXT PRIMARY KEY,
+                    ip TEXT,
+                    hostname TEXT,
+                    hostname_override INTEGER DEFAULT 0,
+                    vendor TEXT,
+                    connection_state TEXT DEFAULT 'online',
+                    lifecycle_flags TEXT,
+                    status TEXT,
+                    dhcp_type TEXT,
+                    device_type TEXT,
+                    device_type_source TEXT,
+                    device_category TEXT,
+                    tags TEXT,
+                    manufacturer TEXT,
+                    model TEXT,
+                    os TEXT,
+                    mdns_services TEXT,
+                    open_ports TEXT,
+                    banners TEXT,
+                    snmp_sysname TEXT,
+                    snmp_sysdescr TEXT,
+                    interface TEXT,
+                    subnet TEXT,
+                    first_seen INTEGER,
+                    last_seen INTEGER,
+                    flag_set_time INTEGER,
+                    flag_acknowledged INTEGER DEFAULT 0,
+                    connected_to_ap TEXT,
+                    ap_name TEXT,
+                    ap_last_seen INTEGER,
+                    notes TEXT,
+                    updated_at INTEGER
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS device_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mac TEXT,
+                    ip TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    field_name TEXT,
+                    old_value TEXT,
+                    new_value TEXT,
+                    details TEXT
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    ip TEXT NOT NULL,
+                    mac TEXT,
+                    hostname TEXT,
+                    details TEXT
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS device_overrides (
+                    mac TEXT PRIMARY KEY,
+                    ip TEXT,
+                    hostname TEXT,
+                    device_type TEXT,
+                    manufacturer TEXT,
+                    model TEXT,
+                    os TEXT,
+                    location TEXT,
+                    tags TEXT,
+                    notes TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+            ''')
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='devices'")
+    if cur.fetchone():
         cur.execute("PRAGMA table_info(devices)")
         existing_cols = {row[1] for row in cur.fetchall()}
-        
-        # Add v1.3.x columns
-        if 'device_type_source' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN device_type_source TEXT')
-        if 'os' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN os TEXT')
-        if 'banners' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN banners TEXT')
-        if 'new_acknowledged' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN new_acknowledged INTEGER DEFAULT 0')
-        
-        # Add v1.5.0 dual-state columns
-        if 'connection_state' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN connection_state TEXT DEFAULT "online"')
-        if 'lifecycle_flags' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN lifecycle_flags TEXT')
-        if 'flag_set_time' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN flag_set_time INTEGER')
-        if 'flag_acknowledged' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN flag_acknowledged INTEGER DEFAULT 0')
-        
-        # Add v1.5.1 DHCP type column
-        if 'dhcp_type' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN dhcp_type TEXT DEFAULT "unknown"')
-        
-        # Add v1.6.0 discovered vs override columns
-        if 'discovered_manufacturer' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN discovered_manufacturer TEXT')
-        if 'discovered_model' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN discovered_model TEXT')
-        if 'discovered_os' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN discovered_os TEXT')
-        if 'os_version' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN os_version TEXT')
-        if 'device_category' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN device_category TEXT')
-        if 'exhaustive_ports' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN exhaustive_ports TEXT')
-        if 'exhaustive_ports_time' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN exhaustive_ports_time INTEGER')
-        
-        # Add v2.0.0 topology columns
-        if 'connected_to_ap' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN connected_to_ap TEXT')
-        if 'ap_name' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN ap_name TEXT')
-        if 'ap_last_seen' not in existing_cols:
-            cur.execute('ALTER TABLE devices ADD COLUMN ap_last_seen INTEGER')
-        
-        # Migrate old status to new dual-state system
-        cur.execute('''
-            UPDATE devices SET
-                connection_state = CASE
-                    WHEN status = "gone" THEN "gone"
-                    WHEN status LIKE "%offline%" THEN "offline"
-                    ELSE "online"
-                END,
-                lifecycle_flags = CASE
-                    WHEN status LIKE "%new%" THEN "new"
-                    WHEN status LIKE "%changed%" THEN "changed"
-                    WHEN status LIKE "%back%" THEN "back"
-                    ELSE ""
-                END
-            WHERE connection_state IS NULL OR connection_state = ""
-        ''')
-    
+        for col, decl in [
+            ("device_type_source", "TEXT"),
+            ("os", "TEXT"),
+            ("banners", "TEXT"),
+            ("connection_state", "TEXT DEFAULT 'online'"),
+            ("lifecycle_flags", "TEXT"),
+            ("flag_set_time", "INTEGER"),
+            ("flag_acknowledged", "INTEGER DEFAULT 0"),
+            ("dhcp_type", "TEXT DEFAULT 'unknown'"),
+            ("discovered_manufacturer", "TEXT"),
+            ("discovered_model", "TEXT"),
+            ("discovered_os", "TEXT"),
+            ("os_version", "TEXT"),
+            ("device_category", "TEXT"),
+            ("exhaustive_ports", "TEXT"),
+            ("exhaustive_ports_time", "INTEGER"),
+            ("connected_to_ap", "TEXT"),
+            ("ap_name", "TEXT"),
+            ("ap_last_seen", "INTEGER"),
+            ("hostname_override", "INTEGER DEFAULT 0"),
+            ("notes", "TEXT"),
+            ("created_at", "INTEGER"),
+        ]:
+            if col not in existing_cols:
+                cur.execute(f"ALTER TABLE devices ADD COLUMN {col} {decl}")
+
+        cur.execute("PRAGMA table_info(device_history)")
+        hcols = {row[1] for row in cur.fetchall()}
+        if "mac" not in hcols:
+            cur.execute("ALTER TABLE device_history ADD COLUMN mac TEXT")
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_history_ip ON device_history(ip, timestamp DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_history_mac ON device_history(mac, timestamp DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC)")
+
     conn.commit()
     conn.close()
 
 def write_to_sqlite(devices: List[Dict], events: List[Dict]):
-    """Write current device state and events to SQLite"""
+    """Write current device state and events to SQLite (keyed by MAC)."""
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10.0)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        
-        # Get existing devices to track changes and acknowledgments (v1.5.0)
-        cur.execute('SELECT ip, hostname, status, vendor, connection_state, lifecycle_flags, flag_acknowledged, flag_set_time, first_seen FROM devices')
-        existing = {row['ip']: dict(row) for row in cur.fetchall()}
+
+        cur.execute('''
+            SELECT mac, ip, hostname, status, vendor, connection_state, lifecycle_flags,
+                   flag_acknowledged, flag_set_time, first_seen
+            FROM devices
+        ''')
+        existing = {}
+        for row in cur.fetchall():
+            rd = dict(row)
+            key = rd.get("mac") or device_key("", rd.get("ip") or "")
+            if key:
+                existing[key] = rd
     except Exception as e:
         log_error(f"SQLite connection failed: {e}")
         raise
-    
-    # Upsert devices
+
     devices_written = 0
+    now = int(time.time())
     for dev in devices:
-        ip = dev.get('ip')
-        if not ip:
+        ip = dev.get("ip") or ""
+        key = device_key(dev.get("mac") or "", ip)
+        if not key:
             continue
-        
+
         try:
-            old_dev = existing.get(ip)
-            
-            # Track changes for history
+            old_dev = existing.get(key)
+
             if old_dev:
-                # Check for status change
-                if old_dev.get('status') != dev.get('status'):
+                if old_dev.get("status") != dev.get("status"):
                     cur.execute('''
-                        INSERT INTO device_history (ip, timestamp, event_type, field_name, old_value, new_value)
-                        VALUES (?, ?, 'status_change', 'status', ?, ?)
-                    ''', (ip, int(time.time()), old_dev.get('status', ''), dev.get('status', '')))
-                
-                # Check for hostname change  
-                if old_dev.get('hostname') != dev.get('hostname'):
+                        INSERT INTO device_history (mac, ip, timestamp, event_type, field_name, old_value, new_value)
+                        VALUES (?, ?, ?, 'status_change', 'status', ?, ?)
+                    ''', (key, ip, now, old_dev.get("status", ""), dev.get("status", "")))
+                if old_dev.get("hostname") != dev.get("hostname"):
                     cur.execute('''
-                        INSERT INTO device_history (ip, timestamp, event_type, field_name, old_value, new_value)
-                        VALUES (?, ?, 'attribute_change', 'hostname', ?, ?)
-                    ''', (ip, int(time.time()), old_dev.get('hostname', ''), dev.get('hostname', '')))
-            
-            # Preserve flag_acknowledged from existing device (v1.5.1)
-            flag_ack = dev.get('flag_acknowledged', 0)
-            if old_dev and old_dev.get('flag_acknowledged'):
+                        INSERT INTO device_history (mac, ip, timestamp, event_type, field_name, old_value, new_value)
+                        VALUES (?, ?, ?, 'attribute_change', 'hostname', ?, ?)
+                    ''', (key, ip, now, old_dev.get("hostname", ""), dev.get("hostname", "")))
+                if old_dev.get("ip") and ip and old_dev.get("ip") != ip:
+                    cur.execute('''
+                        INSERT INTO device_history (mac, ip, timestamp, event_type, field_name, old_value, new_value)
+                        VALUES (?, ?, ?, 'attribute_change', 'ip', ?, ?)
+                    ''', (key, ip, now, old_dev.get("ip", ""), ip))
+
+            flag_ack = dev.get("flag_acknowledged", 0)
+            if old_dev and old_dev.get("flag_acknowledged"):
                 flag_ack = 1
-            
-            # Insert or update device (v1.5.1 - dhcp type, v2.0.9 - device_category)
+
+            first_seen = int(dev.get("first_seen", now))
+            if old_dev and old_dev.get("first_seen"):
+                first_seen = min(first_seen, int(old_dev["first_seen"]))
+
             cur.execute('''
                 INSERT INTO devices (
-                    ip, mac, hostname, vendor,
+                    mac, ip, hostname, vendor,
                     connection_state, lifecycle_flags, status, dhcp_type,
                     device_type, device_type_source, device_category, tags, manufacturer, model, os,
                     mdns_services, open_ports, banners, snmp_sysname, snmp_sysdescr,
                     interface, subnet, first_seen, last_seen,
                     flag_set_time, flag_acknowledged, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(ip) DO UPDATE SET
-                    mac=excluded.mac,
+                ON CONFLICT(mac) DO UPDATE SET
+                    ip=excluded.ip,
                     hostname=excluded.hostname,
                     vendor=excluded.vendor,
                     connection_state=excluded.connection_state,
@@ -375,55 +653,55 @@ def write_to_sqlite(devices: List[Dict], events: List[Dict]):
                     flag_set_time=excluded.flag_set_time,
                     updated_at=excluded.updated_at
             ''', (
+                key,
                 ip,
-                dev.get('mac', ''),
-                dev.get('hostname', ''),
-                dev.get('vendor', ''),
-                dev.get('connection_state', 'online'),
-                dev.get('lifecycle_flags', ''),
-                dev.get('status', ''),
-                dev.get('dhcp_type', 'unknown'),
-                dev.get('device_type', ''),
-                dev.get('device_type_source', ''),
-                dev.get('device_category', ''),
-                json.dumps(dev.get('tags', [])),
-                dev.get('manufacturer', ''),
-                dev.get('model', ''),
-                dev.get('os', ''),
-                json.dumps(dev.get('mdns_services', [])),
-                json.dumps(dev.get('open_ports', [])),
-                json.dumps(dev.get('banners', {})),
-                dev.get('snmp_sysname', ''),
-                dev.get('snmp_sysdescr', ''),
-                dev.get('interface', ''),
-                dev.get('subnet', ''),
-                int(dev.get('first_seen', time.time())),
-                int(dev.get('last_seen', time.time())),
-                int(dev.get('flag_set_time', time.time())),
+                dev.get("hostname", ""),
+                dev.get("vendor", ""),
+                dev.get("connection_state", "online"),
+                dev.get("lifecycle_flags", ""),
+                dev.get("status", ""),
+                dev.get("dhcp_type", "unknown"),
+                dev.get("device_type", ""),
+                dev.get("device_type_source", ""),
+                dev.get("device_category", ""),
+                json.dumps(dev.get("tags", [])),
+                dev.get("manufacturer", ""),
+                dev.get("model", ""),
+                dev.get("os", ""),
+                json.dumps(dev.get("mdns_services", [])),
+                json.dumps(dev.get("open_ports", [])),
+                json.dumps(dev.get("banners", {})),
+                dev.get("snmp_sysname", ""),
+                dev.get("snmp_sysdescr", ""),
+                dev.get("interface", ""),
+                dev.get("subnet", ""),
+                first_seen,
+                int(dev.get("last_seen", now)),
+                int(dev.get("flag_set_time", now)),
                 flag_ack,
-                int(time.time())
+                now,
             ))
             devices_written += 1
         except Exception as e:
-            log_error(f"Error writing device {ip}: {e}")
+            log_error(f"Error writing device {key}: {e}")
             continue
-    
-    # Insert events (keep last 1000)
+
     events_written = 0
     try:
-        cur.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY timestamp DESC LIMIT 1000)')
-        for evt in events[:100]:  # Only insert recent events
+        cur.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY timestamp DESC LIMIT 1000)")
+        for evt in events[:100]:
             try:
+                emac = normalize_mac(evt.get("mac") or "") or device_key(evt.get("mac") or "", evt.get("ip") or "")
                 cur.execute('''
                     INSERT INTO events (timestamp, event_type, ip, mac, hostname, details)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
-                    int(evt.get('time', time.time())),
-                    evt.get('type', ''),
-                    evt.get('ip', ''),
-                    evt.get('mac', ''),
-                    evt.get('hostname', ''),
-                    json.dumps(evt.get('details', {}))
+                    int(evt.get("time", time.time())),
+                    evt.get("type", ""),
+                    evt.get("ip", ""),
+                    emac,
+                    evt.get("hostname", ""),
+                    json.dumps(evt.get("details", {})),
                 ))
                 events_written += 1
             except Exception as e:
@@ -431,7 +709,7 @@ def write_to_sqlite(devices: List[Dict], events: List[Dict]):
                 continue
     except Exception as e:
         log_error(f"Error managing events table: {e}")
-    
+
     try:
         conn.commit()
     except Exception as e:
@@ -439,10 +717,10 @@ def write_to_sqlite(devices: List[Dict], events: List[Dict]):
         raise
     finally:
         conn.close()
-    
-    # Log success only on first write or if count changed significantly
+
     if devices_written > 0:
         log_error(f"SQLite: wrote {devices_written} devices, {events_written} events")
+
 
 def load_oui_from_sqlite() -> Tuple[Dict[str, str], Dict[str, str]]:
     """
@@ -921,14 +1199,15 @@ def make_event(ev_type: str, now: int, ip: str, mac: str, hostname: str, details
 
 def merge(devs: Dict[str, Dict], now: int, ip: str, mac: str, hostname: str,
           iface: str, subnet: str, vendor_map: Dict[str, str], model_hints: Dict[str, str], src: str, up: bool):
-    key = mac.lower() if mac else f"ip:{ip}"
+    mac_n = normalize_mac(mac)
+    key = device_key(mac_n, ip)
     rec = devs.get(key)
     changed_fields = []
 
     if rec is None:
         rec = {
             "ip": ip,
-            "mac": mac or "",
+            "mac": mac_n,
             "hostname": hostname or "",
             "vendor": "",
             "first_seen": now,
@@ -967,8 +1246,8 @@ def merge(devs: Dict[str, Dict], now: int, ip: str, mac: str, hostname: str,
             rec["interface"] = iface
         if subnet and subnet != rec.get("subnet"):
             rec["subnet"] = subnet
-        if mac and not rec.get("mac"):
-            rec["mac"] = mac
+        if mac_n and not rec.get("mac"):
+            rec["mac"] = mac_n
 
     rec["last_seen"] = now
     rec["state"] = "UP" if up else rec.get("state", "UNKNOWN")
@@ -977,7 +1256,7 @@ def merge(devs: Dict[str, Dict], now: int, ip: str, mac: str, hostname: str,
         rec.setdefault("source", []).append(src)
 
     # Set vendor from OUI lookup
-    if rec.get("mac") and not rec.get("vendor"):
+    if rec.get("mac") and not rec.get("vendor") and not str(rec.get("mac")).startswith("ip:"):
         vend = vendor_map.get(mac_oui(rec["mac"]))
         if vend:
             rec["vendor"] = vend
@@ -1012,6 +1291,13 @@ def merge(devs: Dict[str, Dict], now: int, ip: str, mac: str, hostname: str,
         if category:
             rec["device_category"] = category
 
+    # Auto-tagging rules (v2.1.0)
+    if HAS_AUTO_TAGS:
+        try:
+            rec["tags"] = apply_auto_tags(rec)
+        except Exception:
+            pass
+
     return key, rec, changed_fields
 
 def reconcile_ip_mac(devs: Dict[str, Dict], ip: str, mac: str) -> None:
@@ -1019,7 +1305,9 @@ def reconcile_ip_mac(devs: Dict[str, Dict], ip: str, mac: str) -> None:
     if not ip or not mac:
         return
     ip_key = f"ip:{ip}"
-    mac_key = mac.lower()
+    mac_key = normalize_mac(mac)
+    if not mac_key:
+        return
     ip_rec = devs.get(ip_key)
     if ip_rec is None:
         return
@@ -1050,6 +1338,7 @@ def reconcile_ip_mac(devs: Dict[str, Dict], ip: str, mac: str) -> None:
     mac_rec["first_seen"] = min(int(mac_rec.get("first_seen", 0) or 0), int(ip_rec.get("first_seen", 0) or 0)) or mac_rec.get("first_seen", 0)
     mac_rec["last_seen"] = max(int(mac_rec.get("last_seen", 0) or 0), int(ip_rec.get("last_seen", 0) or 0))
     mac_rec["ip"] = ip
+    mac_rec["mac"] = mac_key
 
     devs[mac_key] = mac_rec
     del devs[ip_key]
@@ -1212,7 +1501,12 @@ def main():
             f.flush()
     except: pass
 
-    iface_filter = {x.strip() for x in args.interfaces.split(",") if x.strip()} or None
+    # Treat blank / _LAN_ / all as "all interfaces" (v2.1.0)
+    raw_ifaces = [x.strip() for x in (args.interfaces or "").split(",") if x.strip()]
+    if not raw_ifaces or all(x.upper() in ("_LAN_", "LAN", "ALL", "*") for x in raw_ifaces):
+        iface_filter = None
+    else:
+        iface_filter = set(raw_ifaces)
     vendor_map, model_hints = load_oui(DEFAULT_OUI)  # Reads from SQLite first, CSV fallback (v1.6.10)
     
     try:
@@ -1239,7 +1533,7 @@ def main():
             f.write(f"  Initializing SQLite at {DB_FILE}...\n")
             f.flush()
         init_sqlite_db()
-        log_error(f"NetDiscover v1.3.4 started - PID {os.getpid()}, interval {args.interval}s")
+        log_error(f"NetDiscover v2.1.0 started - PID {os.getpid()}, interval {args.interval}s")
         with open(STARTUP_LOG, "a") as f:
             f.write(f"  ✓ SQLite initialized successfully\n")
             f.write(f"  ✓ Daemon ready - entering main loop\n")
@@ -1250,13 +1544,58 @@ def main():
             f.flush()
         log_error(f"SQLite init failed: {e}")
         sys.exit(1)
-    
-    state = load_json(STATE_FILE, {"devices": {}, "events": []})
-    devs_raw = state.get("devices", {}) if isinstance(state, dict) else {}
-    # Ensure devs is always a dict, not a list
-    devs: Dict[str, Dict] = devs_raw if isinstance(devs_raw, dict) else {}
-    events_raw = state.get("events", []) if isinstance(state, dict) else []
-    events: List[dict] = events_raw if isinstance(events_raw, list) else []
+
+    # Rehydrate in-memory state from SQLite so offline→missing→gone continues across restarts
+    devs: Dict[str, Dict] = {}
+    events: List[dict] = []
+    try:
+        if os.path.exists(DB_FILE):
+            rconn = sqlite3.connect(DB_FILE, timeout=5.0)
+            rconn.row_factory = sqlite3.Row
+            rcur = rconn.cursor()
+            rcur.execute("SELECT * FROM devices")
+            for row in rcur.fetchall():
+                rd = dict(row)
+                key = rd.get("mac") or device_key("", rd.get("ip") or "")
+                if not key:
+                    continue
+                # Parse JSON columns when present as strings
+                for jk in ("tags", "mdns_services", "open_ports", "exhaustive_ports"):
+                    if isinstance(rd.get(jk), str) and rd[jk]:
+                        try:
+                            rd[jk] = json.loads(rd[jk])
+                        except Exception:
+                            rd[jk] = []
+                if isinstance(rd.get("banners"), str) and rd["banners"]:
+                    try:
+                        rd["banners"] = json.loads(rd["banners"])
+                    except Exception:
+                        rd["banners"] = {}
+                if str(rd.get("mac") or "").startswith("ip:"):
+                    rd["mac"] = ""
+                else:
+                    rd["mac"] = normalize_mac(rd.get("mac") or "") or rd.get("mac") or ""
+                devs[key] = rd
+            rcur.execute("SELECT * FROM events ORDER BY timestamp DESC LIMIT 100")
+            for row in rcur.fetchall():
+                ev = dict(row)
+                ev["time"] = ev.get("timestamp", 0)
+                ev["type"] = ev.get("event_type", "")
+                if isinstance(ev.get("details"), str):
+                    try:
+                        ev["details"] = json.loads(ev["details"] or "{}")
+                    except Exception:
+                        ev["details"] = {}
+                events.append(ev)
+            rconn.close()
+            log_error(f"Rehydrated {len(devs)} devices from SQLite")
+    except Exception as e:
+        log_error(f"SQLite rehydrate failed (continuing empty): {e}")
+        state = load_json(STATE_FILE, {"devices": {}, "events": []})
+        devs_raw = state.get("devices", {}) if isinstance(state, dict) else {}
+        devs = devs_raw if isinstance(devs_raw, dict) else {}
+        events_raw = state.get("events", []) if isinstance(state, dict) else []
+        events = events_raw if isinstance(events_raw, list) else []
 
     stop_evt = threading.Event()
     state_lock = threading.Lock()
@@ -1456,24 +1795,26 @@ def main():
                 sync_conn = sqlite3.connect(DB_FILE, timeout=5.0)
                 sync_cur = sync_conn.cursor()
                 sync_cur.execute('''
-                    SELECT ip, flag_acknowledged, lifecycle_flags, flag_set_time, first_seen 
-                    FROM devices 
+                    SELECT mac, ip, flag_acknowledged, lifecycle_flags, flag_set_time, first_seen
+                    FROM devices
                     WHERE flag_acknowledged = 1 OR lifecycle_flags != ""
                 ''')
                 for row in sync_cur.fetchall():
-                    ip = row[0]
-                    # Find device in memory
-                    found_key = None
-                    for k, rec in devs.items():
-                        if rec.get('ip') == ip:
-                            found_key = k
-                            break
-                    if found_key:
-                        devs[found_key]['flag_acknowledged'] = row[1]
-                        if row[1] == 1:  # If acknowledged, clear flags
+                    found_key = row[0] or device_key("", row[1] or "")
+                    if found_key and found_key not in devs:
+                        # Fallback match by current IP
+                        for k, rec in devs.items():
+                            if rec.get('ip') == row[1]:
+                                found_key = k
+                                break
+                        else:
+                            found_key = None
+                    if found_key and found_key in devs:
+                        devs[found_key]['flag_acknowledged'] = row[2]
+                        if row[2] == 1:  # If acknowledged, clear flags
                             devs[found_key]['lifecycle_flags'] = ''
                         if not devs[found_key].get('first_seen'):
-                            devs[found_key]['first_seen'] = row[4]
+                            devs[found_key]['first_seen'] = row[5]
                 sync_conn.close()
         except Exception as e:
             # Non-fatal - continue without sync
@@ -1485,15 +1826,7 @@ def main():
             for _iface, cidr in subnets:
                 ping_sweep(cidr, args.max_hosts, args.rate_limit_ms)
 
-        # aging -> gone after 10 minutes without being seen
-        with state_lock:
-            for k, rec in list(devs.items()):
-                ls = int(rec.get("last_seen", 0))
-                if ls and now - ls > 600 and rec.get("status") != "gone":
-                    rec["status"] = "gone"
-                    rec["last_change"] = now
-                    events.insert(0, make_event("gone", now, rec.get("ip",""), rec.get("mac",""), rec.get("hostname","")))
-                    devs[k] = rec
+        # Dual-state aging (offline/missing/gone) is handled later in this loop — no legacy 600s gone block.
 
         arp = parse_arp()
         leases = parse_dnsmasq_leases()
@@ -1759,6 +2092,11 @@ def main():
         # Write to SQLite only (v1.1.2+)
         try:
             write_to_sqlite(snapshot_devices, snapshot_events)
+            if HAS_ALERTS and snapshot_events:
+                try:
+                    send_alerts(snapshot_events[:50])
+                except Exception as e:
+                    log_error(f"Alert dispatch error: {e}")
         except Exception as e:
             log_error(f"SQLite write error: {e}")
             # Emergency fallback: write JSON if SQLite fails

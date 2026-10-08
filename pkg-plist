@@ -14,6 +14,8 @@
 /usr/local/opnsense/scripts/NetDiscover/port_scanner.py
 /usr/local/opnsense/scripts/NetDiscover/ap_detector.py
 /usr/local/opnsense/scripts/NetDiscover/ap_syslog_parser.py
+/usr/local/opnsense/scripts/NetDiscover/alerts.py
+/usr/local/opnsense/scripts/NetDiscover/auto_tags.py
 /usr/local/opnsense/scripts/NetDiscover/migrate_to_sqlite.py
 /usr/local/opnsense/scripts/NetDiscover/update_oui.py
 /usr/local/opnsense/scripts/NetDiscover/update_wireshark_manuf.py
@@ -30,6 +32,7 @@
 /usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/OverridesController.php
 /usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/ScanController.php
 /usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/AcknowledgeController.php
+/usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/DeviceIdentity.php
 /usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/DashboardController.php
 /usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/EventsController.php
 /usr/local/opnsense/mvc/app/controllers/OPNsense/NetDiscover/Api/ExportController.php

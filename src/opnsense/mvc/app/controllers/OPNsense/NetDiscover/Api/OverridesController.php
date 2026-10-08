@@ -42,9 +42,10 @@ class OverridesController extends ApiControllerBase
                 return ["result" => "failed", "error" => "Invalid payload"];
             }
 
+            $mac = DeviceIdentity::keyFromPayload($payload);
             $ip = isset($payload['ip']) ? trim($payload['ip']) : '';
-            if (empty($ip)) {
-                return ["result" => "failed", "error" => "IP required"];
+            if ($mac === '') {
+                return ["result" => "failed", "error" => "MAC or IP required"];
             }
 
             $hostname = isset($payload['hostname']) ? trim($payload['hostname']) : '';
@@ -55,29 +56,32 @@ class OverridesController extends ApiControllerBase
             $location = isset($payload['location']) ? trim($payload['location']) : '';
             $tags = isset($payload['tags']) ? array_values(array_filter(array_map('trim', explode(',', $payload['tags'])))) : [];
             $notes = isset($payload['notes']) ? trim($payload['notes']) : '';
-            
-            // Save to SQLite first (v2.0.2 - with column checking)
+
             $dbPath = "/var/db/netdiscover/netdiscover.db";
             if (file_exists($dbPath)) {
                 try {
                     $db = new \SQLite3($dbPath, SQLITE3_OPEN_READWRITE);
                     $db->busyTimeout(5000);
-                    
-                    // Check if os column exists in device_overrides, add if missing
+
                     $result = $db->query("PRAGMA table_info(device_overrides)");
                     $columns = [];
                     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
                         $columns[] = $row['name'];
                     }
-                    
                     if (!in_array('os', $columns)) {
                         $db->exec('ALTER TABLE device_overrides ADD COLUMN os TEXT');
                     }
-                    
+                    if (!in_array('mac', $columns)) {
+                        // Pre-migration DB — fall through to JSON only
+                        $db->close();
+                        throw new \Exception("device_overrides missing mac column");
+                    }
+
                     $stmt = $db->prepare('
-                        INSERT INTO device_overrides (ip, hostname, device_type, manufacturer, model, os, location, tags, notes, updated_at)
-                        VALUES (:ip, :hostname, :device_type, :manufacturer, :model, :os, :location, :tags, :notes, :updated_at)
-                        ON CONFLICT(ip) DO UPDATE SET
+                        INSERT INTO device_overrides (mac, ip, hostname, device_type, manufacturer, model, os, location, tags, notes, updated_at)
+                        VALUES (:mac, :ip, :hostname, :device_type, :manufacturer, :model, :os, :location, :tags, :notes, :updated_at)
+                        ON CONFLICT(mac) DO UPDATE SET
+                            ip=excluded.ip,
                             hostname=excluded.hostname,
                             device_type=excluded.device_type,
                             manufacturer=excluded.manufacturer,
@@ -88,8 +92,9 @@ class OverridesController extends ApiControllerBase
                             notes=excluded.notes,
                             updated_at=excluded.updated_at
                     ');
-                    
+
                     if ($stmt) {
+                        $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
                         $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
                         $stmt->bindValue(':hostname', $hostname, SQLITE3_TEXT);
                         $stmt->bindValue(':device_type', $deviceType, SQLITE3_TEXT);
@@ -102,17 +107,19 @@ class OverridesController extends ApiControllerBase
                         $stmt->bindValue(':updated_at', time(), SQLITE3_INTEGER);
                         $stmt->execute();
                     }
-                    
+
                     $db->close();
                 } catch (\Exception $e) {
                     error_log("SQLite override save error: " . $e->getMessage());
-                    // Don't fail - continue to JSON fallback
                 }
             }
-            
-            // Also save to JSON (backwards compatibility)
+
             $overrides = $this->loadOverrides();
-            $overrides[$ip] = [
+            // Drop legacy IP key if present
+            if ($ip !== '' && isset($overrides[$ip]) && $ip !== $mac) {
+                unset($overrides[$ip]);
+            }
+            $overrides[$mac] = [
                 "hostname" => $hostname ?: null,
                 "device_type" => $deviceType ?: null,
                 "manufacturer" => $manufacturer ?: null,
@@ -120,20 +127,20 @@ class OverridesController extends ApiControllerBase
                 "os" => $os ?: null,
                 "location" => $location ?: null,
                 "tags" => $tags,
-                "notes" => $notes ?: null
+                "notes" => $notes ?: null,
+                "ip" => $ip ?: null
             ];
 
-            // Remove null/empty values
-            $overrides[$ip] = array_filter($overrides[$ip], function($v) {
+            $overrides[$mac] = array_filter($overrides[$mac], function ($v) {
                 return $v !== null && $v !== '' && (!is_array($v) || count($v) > 0);
             });
 
-            if (empty($overrides[$ip])) {
-                unset($overrides[$ip]);
+            if (empty($overrides[$mac])) {
+                unset($overrides[$mac]);
             }
 
             $this->saveOverrides($overrides);
-            return ["result" => "saved"];
+            return ["result" => "saved", "mac" => $mac];
         } catch (\Exception $e) {
             error_log("NetDiscover overrides set error: " . $e->getMessage());
             return ["result" => "failed", "error" => $e->getMessage()];
@@ -148,20 +155,45 @@ class OverridesController extends ApiControllerBase
                 $payload = $this->request->getPost();
             }
 
+            $mac = DeviceIdentity::keyFromPayload($payload);
             $ip = isset($payload['ip']) ? trim($payload['ip']) : '';
-            if (empty($ip)) {
-                return ["result" => "failed", "error" => "IP required"];
+            if ($mac === '' && $ip === '') {
+                return ["result" => "failed", "error" => "MAC or IP required"];
+            }
+
+            $dbPath = "/var/db/netdiscover/netdiscover.db";
+            if (file_exists($dbPath)) {
+                try {
+                    $db = new \SQLite3($dbPath, SQLITE3_OPEN_READWRITE);
+                    $db->busyTimeout(5000);
+                    if ($mac !== '') {
+                        $stmt = $db->prepare('DELETE FROM device_overrides WHERE mac = :mac');
+                        $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                        $stmt->execute();
+                    }
+                    if ($ip !== '') {
+                        $stmt = $db->prepare('DELETE FROM device_overrides WHERE ip = :ip');
+                        $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
+                        $stmt->execute();
+                    }
+                    $db->close();
+                } catch (\Exception $e) {
+                    error_log("SQLite override delete error: " . $e->getMessage());
+                }
             }
 
             $overrides = $this->loadOverrides();
-            unset($overrides[$ip]);
+            if ($mac !== '') {
+                unset($overrides[$mac]);
+            }
+            if ($ip !== '') {
+                unset($overrides[$ip]);
+            }
             $this->saveOverrides($overrides);
-            return ["result" => "deleted"];
+            return ["result" => "deleted", "mac" => $mac];
         } catch (\Exception $e) {
             error_log("NetDiscover overrides delete error: " . $e->getMessage());
             return ["result" => "failed", "error" => $e->getMessage()];
         }
     }
 }
-
-

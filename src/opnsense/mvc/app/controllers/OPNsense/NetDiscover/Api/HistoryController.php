@@ -5,115 +5,156 @@ use OPNsense\Base\ApiControllerBase;
 
 class HistoryController extends ApiControllerBase
 {
+    private function resolveKey()
+    {
+        $mac = DeviceIdentity::normalizeMac($this->request->getQuery("mac", "string", ""));
+        $ip = trim($this->request->getQuery("ip", "string", ""));
+        if ($mac === '' && $ip !== '') {
+            $mac = 'ip:' . $ip;
+        }
+        return [$mac, $ip];
+    }
+
     /**
-     * Get history for a specific device
-     * GET /api/netdiscover/history/device?ip=192.168.1.1
+     * GET /api/netdiscover/history/device?mac=...&ip=...
      */
     public function deviceAction()
     {
-        $ip = $this->request->getQuery("ip", "string", "");
-        if (empty($ip)) {
-            return ["error" => "IP address required", "rows" => []];
+        list($mac, $ip) = $this->resolveKey();
+        if ($mac === '' && $ip === '') {
+            return ["error" => "MAC or IP required", "rows" => []];
         }
-        
+
         $dbPath = "/var/db/netdiscover/netdiscover.db";
         if (!file_exists($dbPath)) {
             return ["error" => "Database not found", "rows" => []];
         }
-        
+
         try {
             $db = new \SQLite3($dbPath, SQLITE3_OPEN_READONLY);
             $db->busyTimeout(5000);
-            
-            $stmt = $db->prepare('SELECT * FROM device_history WHERE ip = :ip ORDER BY timestamp DESC LIMIT 100');
-            $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
+
+            // Prefer MAC; also include rows still keyed only by historical IPs for this MAC
+            if ($mac !== '') {
+                $stmt = $db->prepare(
+                    'SELECT * FROM device_history
+                     WHERE mac = :mac OR (:ip != "" AND ip = :ip)
+                     ORDER BY timestamp DESC LIMIT 200'
+                );
+                $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
+            } else {
+                $stmt = $db->prepare(
+                    'SELECT * FROM device_history WHERE ip = :ip ORDER BY timestamp DESC LIMIT 200'
+                );
+                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
+            }
             $result = $stmt->execute();
-            
+
             $history = [];
+            $ipTrail = [];
             while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
                 $row['details'] = json_decode($row['details'] ?? '{}', true) ?: [];
                 $history[] = $row;
+                if (($row['field_name'] ?? '') === 'ip') {
+                    $ipTrail[] = [
+                        'timestamp' => $row['timestamp'],
+                        'old_ip' => $row['old_value'],
+                        'new_ip' => $row['new_value']
+                    ];
+                }
             }
-            
+
+            // Current IP as head of trail
+            $currentIp = $ip;
+            if ($mac !== '') {
+                $stmt = $db->prepare('SELECT ip FROM devices WHERE mac = :mac');
+                $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                $dev = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+                if ($dev && !empty($dev['ip'])) {
+                    $currentIp = $dev['ip'];
+                }
+            }
+
             $db->close();
-            
+
             return [
-                "ip" => $ip,
+                "mac" => $mac,
+                "ip" => $currentIp,
                 "rows" => $history,
+                "ip_history" => $ipTrail,
                 "total" => count($history)
             ];
         } catch (\Exception $e) {
             error_log("Device history error: " . $e->getMessage());
-            return [
-                "error" => $e->getMessage(),
-                "rows" => []
-            ];
+            return ["error" => $e->getMessage(), "rows" => []];
         }
     }
-    
+
     /**
-     * Get device uptime statistics
-     * GET /api/netdiscover/history/uptime?ip=192.168.1.1&days=30
+     * GET /api/netdiscover/history/uptime?mac=...&ip=...&days=30
      */
     public function uptimeAction()
     {
-        $ip = $this->request->getQuery("ip", "string", "");
+        list($mac, $ip) = $this->resolveKey();
         $days = (int)$this->request->getQuery("days", "int", 30);
-        
-        if (empty($ip)) {
-            return ["error" => "IP address required"];
+
+        if ($mac === '' && $ip === '') {
+            return ["error" => "MAC or IP required"];
         }
-        
+
         $dbPath = "/var/db/netdiscover/netdiscover.db";
         if (!file_exists($dbPath)) {
             return ["error" => "Database not found"];
         }
-        
+
         try {
             $db = new \SQLite3($dbPath, SQLITE3_OPEN_READONLY);
             $db->busyTimeout(5000);
-            
+
             $cutoff = time() - ($days * 86400);
-            
-            // Get status changes
-            $sql = 'SELECT timestamp, old_value, new_value ' .
-                   'FROM device_history ' .
-                   'WHERE ip = :ip AND event_type = "status_change" AND timestamp > :cutoff ' .
-                   'ORDER BY timestamp ASC';
+
+            $sql = 'SELECT timestamp, old_value, new_value, field_name
+                    FROM device_history
+                    WHERE timestamp > :cutoff
+                      AND event_type = "status_change"
+                      AND (mac = :mac OR (:ip != "" AND ip = :ip))
+                    ORDER BY timestamp ASC';
             $stmt = $db->prepare($sql);
-            $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
             $stmt->bindValue(':cutoff', $cutoff, SQLITE3_INTEGER);
+            $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+            $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
             $result = $stmt->execute();
-            
+
             $changes = [];
             while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
                 $changes[] = $row;
             }
-            
-            // Calculate uptime percentage
+
             $totalTime = time() - $cutoff;
             $downTime = 0;
             $lastDown = null;
-            
+
             foreach ($changes as $change) {
-                if ($change['new_value'] === 'gone') {
+                $new = strtolower($change['new_value'] ?? '');
+                $isDown = (str_contains($new, 'offline') || str_contains($new, 'missing') || str_contains($new, 'gone'));
+                $isUp = (str_contains($new, 'online') || $new === 'back' || $new === 'up' || $new === 'active');
+                if ($isDown) {
                     $lastDown = $change['timestamp'];
-                } elseif ($lastDown && in_array($change['new_value'], ['back', 'up', 'active'])) {
+                } elseif ($lastDown && $isUp) {
                     $downTime += $change['timestamp'] - $lastDown;
                     $lastDown = null;
                 }
             }
-            
-            // If currently down, add time until now
             if ($lastDown) {
                 $downTime += time() - $lastDown;
             }
-            
+
             $uptime = $totalTime > 0 ? (($totalTime - $downTime) / $totalTime) * 100 : 0;
-            
             $db->close();
-            
+
             return [
+                "mac" => $mac,
                 "ip" => $ip,
                 "days" => $days,
                 "uptime_percent" => round($uptime, 2),
@@ -125,52 +166,55 @@ class HistoryController extends ApiControllerBase
             return ["error" => $e->getMessage()];
         }
     }
-    
+
     /**
-     * Get timeline data for visual graph
-     * GET /api/netdiscover/history/timeline?ip=192.168.1.1&days=30
+     * GET /api/netdiscover/history/timeline?mac=...&ip=...&days=30
      */
     public function timelineAction()
     {
-        $ip = $this->request->getQuery("ip", "string", "");
+        list($mac, $ip) = $this->resolveKey();
         $days = (int)$this->request->getQuery("days", "int", 30);
-        
-        if (empty($ip)) {
-            return ["error" => "IP address required"];
+
+        if ($mac === '' && $ip === '') {
+            return ["error" => "MAC or IP required"];
         }
-        
+
         $dbPath = "/var/db/netdiscover/netdiscover.db";
         if (!file_exists($dbPath)) {
             return ["error" => "Database not found"];
         }
-        
+
         try {
             $db = new \SQLite3($dbPath, SQLITE3_OPEN_READONLY);
             $db->busyTimeout(5000);
-            
+
             $cutoff = time() - ($days * 86400);
-            
-            // Get device info
-            $stmt = $db->prepare('SELECT first_seen, last_seen, status FROM devices WHERE ip = :ip');
-            $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
-            $result = $stmt->execute();
-            $device = $result->fetchArray(SQLITE3_ASSOC);
-            
+
+            if ($mac !== '') {
+                $stmt = $db->prepare('SELECT first_seen, last_seen, status, connection_state, ip FROM devices WHERE mac = :mac');
+                $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+            } else {
+                $stmt = $db->prepare('SELECT first_seen, last_seen, status, connection_state, ip FROM devices WHERE ip = :ip');
+                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
+            }
+            $device = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+
             if (!$device) {
                 $db->close();
                 return ["error" => "Device not found"];
             }
-            
-            // Get all status changes
-            $sql = 'SELECT timestamp, event_type, old_value, new_value ' .
-                   'FROM device_history ' .
-                   'WHERE ip = :ip AND event_type = "status_change" AND timestamp > :cutoff ' .
-                   'ORDER BY timestamp ASC';
+
+            $sql = 'SELECT timestamp, event_type, old_value, new_value
+                    FROM device_history
+                    WHERE event_type = "status_change" AND timestamp > :cutoff
+                      AND (mac = :mac OR (:ip != "" AND ip = :ip))
+                    ORDER BY timestamp ASC';
             $stmt = $db->prepare($sql);
-            $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
             $stmt->bindValue(':cutoff', $cutoff, SQLITE3_INTEGER);
+            $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+            $stmt->bindValue(':ip', $ip !== '' ? $ip : ($device['ip'] ?? ''), SQLITE3_TEXT);
             $result = $stmt->execute();
-            
+
             $changes = [];
             while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
                 $changes[] = [
@@ -179,16 +223,14 @@ class HistoryController extends ApiControllerBase
                     'to' => $row['new_value']
                 ];
             }
-            
-            // Build timeline segments
+
             $segments = [];
-            $start_time = max($cutoff, $device['first_seen']);
+            $start_time = max($cutoff, (int)$device['first_seen']);
             $end_time = time();
-            $total_duration = $end_time - $start_time;
-            
+            $total_duration = max(1, $end_time - $start_time);
+
             if (count($changes) === 0) {
-                // No status changes - single segment
-                $status = $device['status'] ?: 'up';
+                $status = $device['connection_state'] ?: ($device['status'] ?: 'online');
                 $segments[] = [
                     'status' => $status,
                     'start' => $start_time,
@@ -197,12 +239,9 @@ class HistoryController extends ApiControllerBase
                     'percent' => 100.0
                 ];
             } else {
-                // Build segments from status changes
                 $current_time = $start_time;
-                $current_status = 'up'; // Assume up initially
-                
+                $current_status = 'online';
                 foreach ($changes as $change) {
-                    // Add segment for current status
                     if ($change['timestamp'] > $current_time) {
                         $duration = $change['timestamp'] - $current_time;
                         $segments[] = [
@@ -213,12 +252,9 @@ class HistoryController extends ApiControllerBase
                             'percent' => ($duration / $total_duration) * 100.0
                         ];
                     }
-                    
                     $current_status = $change['to'];
                     $current_time = $change['timestamp'];
                 }
-                
-                // Final segment to now
                 if ($current_time < $end_time) {
                     $duration = $end_time - $current_time;
                     $segments[] = [
@@ -230,11 +266,12 @@ class HistoryController extends ApiControllerBase
                     ];
                 }
             }
-            
+
             $db->close();
-            
+
             return [
-                "ip" => $ip,
+                "mac" => $mac,
+                "ip" => $device['ip'] ?? $ip,
                 "days" => $days,
                 "start_time" => $start_time,
                 "end_time" => $end_time,
@@ -247,4 +284,3 @@ class HistoryController extends ApiControllerBase
         }
     }
 }
-

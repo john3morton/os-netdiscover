@@ -8,7 +8,7 @@
   <field><id>general.reverse_dns</id><label>Reverse DNS enrichment (PTR)</label><type>checkbox</type></field>
 
   <field><id>general.interfaces</id><label>Interfaces (optional)</label><type>text</type>
-    <help>Default: _LAN_. Comma-separated; blank = all.</help></field>
+    <help>Comma-separated interface names; blank = all interfaces. (_LAN_ is treated as all.)</help></field>
 
   <field><id>general.max_hosts</id><label>Max hosts per subnet (active scan)</label><type>text</type>
     <help>Default: 4096</help></field>

@@ -7,9 +7,8 @@ class AcknowledgeController extends ApiControllerBase
 {
     /**
      * Mark a device as acknowledged (user viewed details)
-     * v1.5.0: Clears lifecycle flags (new/changed/back)
      * POST /api/netdiscover/acknowledge/device
-     * Payload: {"ip": "192.168.1.1"}
+     * Payload: {"mac":"aa:bb:..."} or {"ip":"..."}
      */
     public function deviceAction()
     {
@@ -17,39 +16,39 @@ class AcknowledgeController extends ApiControllerBase
         if (!is_array($payload)) {
             $payload = $this->request->getPost();
         }
-        
+
+        $mac = DeviceIdentity::keyFromPayload(is_array($payload) ? $payload : []);
         $ip = isset($payload['ip']) ? trim($payload['ip']) : '';
-        if (empty($ip)) {
-            return ["result" => "failed", "error" => "IP required"];
+        if ($mac === '') {
+            return ["result" => "failed", "error" => "MAC or IP required"];
         }
-        
+
         $dbPath = "/var/db/netdiscover/netdiscover.db";
         if (!file_exists($dbPath)) {
             return ["result" => "failed", "error" => "Database not found"];
         }
-        
+
         try {
             $db = new \SQLite3($dbPath, SQLITE3_OPEN_READWRITE);
             $db->busyTimeout(5000);
-            
-            // Clear lifecycle flags and set acknowledged
+
             $stmt = $db->prepare('
-                UPDATE devices 
+                UPDATE devices
                 SET flag_acknowledged = 1,
                     lifecycle_flags = "",
                     status = connection_state
-                WHERE ip = :ip
+                WHERE mac = :mac OR (:ip != "" AND ip = :ip)
             ');
+            $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
             $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
             $stmt->execute();
-            
+
             $db->close();
-            
-            return ["result" => "success", "ip" => $ip];
+
+            return ["result" => "success", "mac" => $mac, "ip" => $ip];
         } catch (\Exception $e) {
             error_log("Acknowledge device error: " . $e->getMessage());
             return ["result" => "failed", "error" => $e->getMessage()];
         }
     }
 }
-

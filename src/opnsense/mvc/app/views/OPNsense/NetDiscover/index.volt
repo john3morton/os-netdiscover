@@ -357,6 +357,7 @@
             <div class="modal-body">
               <form id="editDeviceForm">
                 <input type="hidden" id="edit_ip">
+                <input type="hidden" id="edit_mac">
                 <div class="form-group">
                   <label>IP Address</label>
                   <input type="text" class="form-control" id="edit_ip_display" readonly>

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.1.0 - MAC Identity + Hardening + Expansion
+- **MAC primary key**: Devices are identified by MAC (synthetic `ip:<addr>` only when MAC unknown). Automatic DB migration dedupes prior IP-keyed clones.
+- **API/UI keyed by MAC**: Overrides, acknowledge, history, delete, and bulk actions prefer MAC; IP retained for scans and display.
+- **IP history in device details**: Current tab shows prior IP changes; History tab queries by MAC so trails survive DHCP churn.
+- **Overrides SQLite fixed**: `ON CONFLICT(mac)` (was silently failing after MAC migration).
+- **Dashboard/uptime fixed**: Counts use `connection_state` / `lifecycle_flags` instead of composite `status` strings.
+- **Passive discovery default**: Blank / `_LAN_` means all interfaces (no longer silently disables SSDP/mDNS/etc.).
+- **Removed legacy 600s "gone" aging** that fought the dual-state engine.
+- **Daemon rehydrates from SQLite** on startup so offline→missing→gone continues across restarts.
+- **XSS hardening**: Device detail/history interpolations escaped in JS.
+- **Service OUI actions**: UI calls use POST.
+- **Webhook alerts** (optional): `/var/db/netdiscover/alerts.json` — enable + `webhook_url` + event list.
+- **Auto-tag rules** (optional): `/var/db/netdiscover/auto_tags.json` — match vendor/hostname/subnet/type and add tags.
+
 ## 2.0.14 - Executable Bit Fix
 - **rc.d / scripts**: Source files now carry the git executable bit so `make package` installs `netdiscoverd` and Python helpers as mode 755.
 - Fixes `service netdiscoverd` reporting “does not exist … or is not executable” after a fresh install on OPNsense 26.7.

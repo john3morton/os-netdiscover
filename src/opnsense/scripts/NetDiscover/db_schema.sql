@@ -1,10 +1,10 @@
 -- NetDiscover SQLite Schema with Historical Tracking
--- Version 1.1.0
+-- Version 2.1.0 — device identity is MAC (ip:ADDR for MAC-less hosts)
 
--- Current device inventory (latest state for each device)
+-- Current device inventory (one row per MAC / synthetic ip: key)
 CREATE TABLE IF NOT EXISTS devices (
-    ip TEXT PRIMARY KEY,
-    mac TEXT,
+    mac TEXT PRIMARY KEY,
+    ip TEXT,
     hostname TEXT,
     hostname_override INTEGER DEFAULT 0,
     vendor TEXT,
@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS devices (
     dhcp_type TEXT, -- static|reserved|dynamic|unknown (v1.5.1)
     device_type TEXT,
     device_type_source TEXT, -- 'pattern_match', 'ssdp', 'snmp', 'mdns', etc.
+    device_category TEXT,
     tags TEXT, -- JSON array
     -- v1.6.0: Separate discovered vs override values
     discovered_manufacturer TEXT, -- From OUI/SSDP/SNMP
@@ -46,30 +47,29 @@ CREATE TABLE IF NOT EXISTS devices (
     updated_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip);
 CREATE INDEX IF NOT EXISTS idx_devices_connected_to_ap ON devices(connected_to_ap);
-
 CREATE INDEX IF NOT EXISTS idx_devices_dhcp_type ON devices(dhcp_type);
-
 CREATE INDEX IF NOT EXISTS idx_devices_connection_state ON devices(connection_state);
 CREATE INDEX IF NOT EXISTS idx_devices_lifecycle_flags ON devices(lifecycle_flags);
-
 CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
-CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac);
 
 -- Device history - tracks all changes to devices over time
 CREATE TABLE IF NOT EXISTS device_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT,
     ip TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
     event_type TEXT NOT NULL, -- 'discovered', 'status_change', 'attribute_change', 'removed'
-    field_name TEXT, -- Which field changed (hostname, status, etc.)
+    field_name TEXT, -- Which field changed (hostname, status, ip, etc.)
     old_value TEXT,
     new_value TEXT,
     details TEXT, -- JSON with additional context
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_history_mac ON device_history(mac, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_history_ip ON device_history(ip, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_history_timestamp ON device_history(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_history_event_type ON device_history(event_type);
@@ -88,21 +88,25 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_events_ip ON events(ip);
+CREATE INDEX IF NOT EXISTS idx_events_mac ON events(mac);
 
--- User overrides (custom settings per device) - v1.6.0: added os
+-- User overrides (custom settings per device) - keyed by MAC
 CREATE TABLE IF NOT EXISTS device_overrides (
-    ip TEXT PRIMARY KEY,
+    mac TEXT PRIMARY KEY,
+    ip TEXT,
     hostname TEXT,
     device_type TEXT,
     manufacturer TEXT,
     model TEXT,
-    os TEXT, -- Operating system override
+    os TEXT,
     location TEXT,
     tags TEXT, -- JSON array
     notes TEXT,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_overrides_ip ON device_overrides(ip);
 
 -- Scan statistics (performance metrics)
 CREATE TABLE IF NOT EXISTS scan_stats (
@@ -119,16 +123,17 @@ CREATE TABLE IF NOT EXISTS scan_stats (
 CREATE INDEX IF NOT EXISTS idx_scan_stats_timestamp ON scan_stats(timestamp DESC);
 
 -- View for joining devices with overrides
+DROP VIEW IF EXISTS devices_with_overrides;
 CREATE VIEW IF NOT EXISTS devices_with_overrides AS
-SELECT 
+SELECT
     d.*,
     o.hostname AS override_hostname,
     o.device_type AS override_device_type,
     o.tags AS override_tags,
     o.notes AS override_notes,
-    CASE WHEN o.ip IS NOT NULL THEN 1 ELSE 0 END AS has_override
+    CASE WHEN o.mac IS NOT NULL THEN 1 ELSE 0 END AS has_override
 FROM devices d
-LEFT JOIN device_overrides o ON d.ip = o.ip;
+LEFT JOIN device_overrides o ON d.mac = o.mac;
 
 -- Auto-cleanup trigger for old events (keep last 1000)
 CREATE TRIGGER IF NOT EXISTS cleanup_old_events
@@ -143,7 +148,6 @@ END;
 CREATE TRIGGER IF NOT EXISTS cleanup_old_history
 AFTER INSERT ON device_history
 BEGIN
-    DELETE FROM device_history 
+    DELETE FROM device_history
     WHERE timestamp < strftime('%s', 'now', '-90 days');
 END;
-

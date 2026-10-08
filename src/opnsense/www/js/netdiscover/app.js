@@ -30,7 +30,7 @@
     interval: '300',
     active_scan: '0',
     reverse_dns: '1',
-    interfaces: '_LAN_',
+    interfaces: '',
     max_hosts: '4096',
     rate_limit_ms: '3',
     ssdp_enable: '1',
@@ -320,7 +320,7 @@
     
     $.ajax({
       url: url,
-      type: 'GET',
+      type: 'POST',
       timeout: 90000,
       success: function(data) {
         if (data.status === 'success') {
@@ -401,6 +401,30 @@
   let invSortDir = localStorage.getItem('nd_inv_sort_dir') || 'asc';
   let invData = [];
   let selectedDevices = new Set();
+
+  // v2.1.0: device identity + XSS-safe HTML
+  function ndEsc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]);
+    });
+  }
+  function ndDeviceKey(d) {
+    if (!d) return '';
+    if (d.id) return String(d.id).toLowerCase();
+    if (d.mac) return String(d.mac).toLowerCase();
+    if (d.ip) return 'ip:' + d.ip;
+    return '';
+  }
+  function ndDevicePayload(d) {
+    const key = ndDeviceKey(d);
+    const payload = { ip: (d && d.ip) || '' };
+    if (key) payload.mac = key;
+    else if (d && d.mac) payload.mac = d.mac;
+    return payload;
+  }
+
+
   
   // Column visibility defaults (v2.0.0 - added via_ap column)
   const defaultColumns = {
@@ -609,11 +633,11 @@
       const checked = this.checked;
       document.querySelectorAll('.device-select-cb').forEach((cb)=>{
         cb.checked = checked;
-        const ip = $(cb).data('ip');
+        const key = $(cb).data('key') || $(cb).data('ip');
         if (checked) {
-          selectedDevices.add(ip);
+          selectedDevices.add(key);
         } else {
-          selectedDevices.delete(ip);
+          selectedDevices.delete(key);
         }
       });
       updateBulkActions();
@@ -848,13 +872,16 @@
       // Checkbox column
       const checkCell = $('<td></td>');
       const checkbox = $('<input type="checkbox" class="device-select-cb">');
+      const rowKey = ndDeviceKey(row);
+      checkbox.data('key', rowKey);
       checkbox.data('ip', row.ip);
-      checkbox.prop('checked', selectedDevices.has(row.ip));
+      checkbox.data('mac', row.mac || '');
+      checkbox.prop('checked', selectedDevices.has(rowKey));
       checkbox.on('change', function() {
         if (this.checked) {
-          selectedDevices.add(row.ip);
+          selectedDevices.add(rowKey);
         } else {
-          selectedDevices.delete(row.ip);
+          selectedDevices.delete(rowKey);
         }
         updateBulkActions();
       });
@@ -1112,12 +1139,12 @@
     });
     
     // Acknowledge device (clears lifecycle flags: new/changed/back)
-    if (device.ip && device.lifecycle_flags) {
+    if (ndDeviceKey(device) && device.lifecycle_flags) {
       $.ajax({
         url: '/api/netdiscover/acknowledge/device',
         type: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ip: device.ip}),
+        data: JSON.stringify(ndDevicePayload(device)),
         success: function() {
           // Silently acknowledged - flags will clear on next scan
           // Update local data immediately for UI responsiveness
@@ -1146,9 +1173,11 @@
     
     if (tab === 'current') {
       html += '<table class="table table-condensed">';
-      html += '<tr><th style="width:200px;">IP Address</th><td>' + (device.ip || '-') + '</td></tr>';
-      html += '<tr><th>MAC Address</th><td>' + (device.mac || '-') + '</td></tr>';
-      html += '<tr><th>Hostname</th><td>' + (device.hostname || '-');
+      html += '<tr><th style="width:200px;">IP Address</th><td>' + ndEsc(device.ip || '-') + '</td></tr>';
+      html += '<tr><th>MAC Address</th><td>' + ndEsc(device.mac || '-') + '</td></tr>';
+
+      html += '<tr><th>IP History</th><td id="nd_ip_history_cell"><em class="text-muted">Loading...</em></td></tr>';
+      html += '<tr><th>Hostname</th><td>' + ndEsc(device.hostname || '-');
       if (device.hostname_override) {
         html += ' <span class="label label-info">Custom</span>';
       }
@@ -1313,19 +1342,55 @@
     });
     
     // Load data for tabs
+
+    if (tab === 'current') {
+      const q = ndDevicePayload(device);
+      const qs = Object.keys(q).map(k => encodeURIComponent(k)+'='+encodeURIComponent(q[k])).join('&');
+      $.ajax({
+        url: '/api/netdiscover/history/device?' + qs,
+        type: 'GET',
+        success: function(data) {
+          const cell = document.getElementById('nd_ip_history_cell');
+          if (!cell) return;
+          const trail = data.ip_history || [];
+          const cur = data.ip || device.ip || '';
+          let h = '<div><strong>Current:</strong> ' + ndEsc(cur || '-') + '</div>';
+          if (trail.length) {
+            h += '<ul style="margin:6px 0 0 16px;padding:0;">';
+            trail.slice(0, 20).forEach(function(t) {
+              const when = t.timestamp ? new Date(t.timestamp * 1000).toLocaleString() : '';
+              h += '<li>' + ndEsc(t.old_ip || '?') + ' → ' + ndEsc(t.new_ip || '?') +
+                   ' <span class="text-muted">(' + ndEsc(when) + ')</span></li>';
+            });
+            h += '</ul>';
+          } else {
+            h += '<div class="text-muted">No prior IP changes recorded yet.</div>';
+          }
+          cell.innerHTML = h;
+        },
+        error: function() {
+          const cell = document.getElementById('nd_ip_history_cell');
+          if (cell) cell.innerHTML = '<span class="text-muted">Unavailable</span>';
+        }
+      });
+    }
+
     if (tab === 'history') {
-      loadDeviceHistoryTimeline(device.ip);
-      loadDeviceHistoryTable(device.ip);
+      loadDeviceHistoryTimeline(device);
+      loadDeviceHistoryTable(device);
     } else if (tab === 'uptime') {
-      loadDeviceUptime(device.ip);
+      loadDeviceUptime(device);
     }
   }
   
-  function loadDeviceHistoryTimeline(ip) {
+  function loadDeviceHistoryTimeline(deviceOrIp) {
+    const device = (typeof deviceOrIp === 'string') ? {ip: deviceOrIp} : deviceOrIp;
+    const q = ndDevicePayload(device);
+    const qs = Object.keys(q).map(k => encodeURIComponent(k)+'='+encodeURIComponent(q[k])).join('&');
     // Load both timeline (connection states) and attribute changes (for markers)
     $.when(
-      $.ajax({url: '/api/netdiscover/history/timeline?ip=' + encodeURIComponent(ip) + '&days=30', type: 'GET'}),
-      $.ajax({url: '/api/netdiscover/history/device?ip=' + encodeURIComponent(ip), type: 'GET'})
+      $.ajax({url: '/api/netdiscover/history/timeline?' + qs + '&days=30', type: 'GET'}),
+      $.ajax({url: '/api/netdiscover/history/device?' + qs, type: 'GET'})
     ).done(function(timelineResult, historyResult) {
       const timelineData = timelineResult[0];
       const historyData = historyResult[0];
@@ -1472,9 +1537,12 @@
     });
   }
   
-  function loadDeviceHistoryTable(ip) {
+  function loadDeviceHistoryTable(deviceOrIp) {
+    const device = (typeof deviceOrIp === 'string') ? {ip: deviceOrIp} : deviceOrIp;
+    const q = ndDevicePayload(device);
+    const qs = Object.keys(q).map(k => encodeURIComponent(k)+'='+encodeURIComponent(q[k])).join('&');
     $.ajax({
-      url: '/api/netdiscover/history/device?ip=' + encodeURIComponent(ip),
+      url: '/api/netdiscover/history/device?' + qs,
       type: 'GET',
       success: function(data) {
         const rows = data.rows || [];
@@ -1493,10 +1561,10 @@
             
             if (h.event_type === 'status_change') {
               eventText = 'Status Changed';
-              details = (h.old_value || '?') + ' → ' + (h.new_value || '?');
+              details = ndEsc(h.old_value || '?') + ' → ' + ndEsc(h.new_value || '?');
             } else if (h.event_type === 'attribute_change') {
-              eventText = h.field_name + ' Changed';
-              details = (h.old_value || '?') + ' → ' + (h.new_value || '?');
+              eventText = ndEsc(h.field_name || 'attribute') + ' Changed';
+              details = ndEsc(h.old_value || '?') + ' → ' + ndEsc(h.new_value || '?');
             } else if (h.event_type === 'discovered') {
               eventText = 'First Discovered';
               details = h.details || '';
@@ -1520,9 +1588,12 @@
     });
   }
   
-  function loadDeviceUptime(ip) {
+  function loadDeviceUptime(deviceOrIp) {
+    const device = (typeof deviceOrIp === 'string') ? {ip: deviceOrIp} : deviceOrIp;
+    const q = ndDevicePayload(device);
+    const qs = Object.keys(q).map(k => encodeURIComponent(k)+'='+encodeURIComponent(q[k])).join('&');
     $.ajax({
-      url: '/api/netdiscover/history/uptime?ip=' + encodeURIComponent(ip) + '&days=30',
+      url: '/api/netdiscover/history/uptime?' + qs + '&days=30',
       type: 'GET',
       success: function(data) {
         let html = '<div style="padding:20px;">';
@@ -1706,6 +1777,7 @@
   function openEditModal(device) {
     $('#edit_ip').val(device.ip);
     $('#edit_ip_display').val(device.ip);
+    $('#edit_mac').val(ndDeviceKey(device));
     $('#edit_mac_display').val(device.mac || '');
     $('#edit_hostname').val(device.hostname_override ? device.hostname : '');
     $('#edit_device_type').val(device.device_type || '');
@@ -1730,6 +1802,7 @@
   $(document).on('click', '#btn_save_device', function() {
     const payload = {
       ip: $('#edit_ip').val(),
+      mac: $('#edit_mac').val() || '',
       hostname: $('#edit_hostname').val(),
       device_type: $('#edit_device_type').val(),
       manufacturer: $('#edit_manufacturer').val(),
@@ -1759,12 +1832,13 @@
 
   $(document).on('click', '#btn_delete_override', function() {
     const ip = $('#edit_ip').val();
-    if (confirm('Clear all custom settings for ' + ip + '?')) {
+    const mac = $('#edit_mac').val();
+    if (confirm('Clear all custom settings for ' + (mac || ip) + '?')) {
       $.ajax({
         url: '/api/netdiscover/overrides/delete',
         type: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ip: ip}),
+        data: JSON.stringify({ip: ip, mac: mac}),
         success: function(data) {
           console.log('Override deleted:', data);
           $('#editDeviceModal').modal('hide');
@@ -1780,8 +1854,10 @@
   // Delete device button - show confirmation modal
   $(document).on('click', '#btn_delete_device', function() {
     const ip = $('#edit_ip').val();
-    $('#delete_confirm_ip').text(ip);
+    const mac = $('#edit_mac').val();
+    $('#delete_confirm_ip').text(mac || ip);
     $('#btn_confirm_delete').data('ip', ip);
+    $('#btn_confirm_delete').data('mac', mac);
     $('#editDeviceModal').modal('hide');
     $('#deleteConfirmModal').modal('show');
   });
@@ -1789,12 +1865,13 @@
   // Confirm delete - actually delete the device
   $(document).on('click', '#btn_confirm_delete', function() {
     const ip = $(this).data('ip');
+    const mac = $(this).data('mac');
     
     $.ajax({
       url: '/api/netdiscover/inventory/delete',
       type: 'POST',
       contentType: 'application/json',
-      data: JSON.stringify({ip: ip}),
+      data: JSON.stringify({ip: ip, mac: mac}),
       success: function(data) {
         console.log('Device deleted:', data);
         $('#deleteConfirmModal').modal('hide');
@@ -1819,7 +1896,7 @@
   // Bulk tag save
   $(document).on('click', '#btn_bulk_tag_save', function() {
     const tags = $('#bulk_tags_input').val();
-    const ips = Array.from(selectedDevices);
+    const keys = Array.from(selectedDevices);
     
     if (!tags.trim()) {
       alert('Please enter at least one tag');
@@ -1827,15 +1904,14 @@
     }
     
     let completed = 0;
-    const total = ips.length;
+    const total = keys.length;
     
-    ips.forEach(function(ip) {
-      // Find device to preserve existing data
-      const device = invData.find(d => d.ip === ip);
+    keys.forEach(function(key) {
+      // Find device to preserve existing data (MAC key preferred)
+      const device = invData.find(d => ndDeviceKey(d) === key || d.ip === key);
       if (!device) return;
       
-      const payload = {
-        ip: ip,
+      const payload = Object.assign(ndDevicePayload(device), {
         hostname: device.hostname_override ? device.hostname : '',
         device_type: device.device_type || '',
         manufacturer: device.manufacturer || '',
@@ -1843,7 +1919,7 @@
         location: device.location || '',
         tags: tags,
         notes: device.notes || ''
-      };
+      });
       
       $.ajax({
         url: '/api/netdiscover/overrides/set',
@@ -1874,26 +1950,27 @@
       return;
     }
     
-    const ips = Array.from(selectedDevices);
+    const keys = Array.from(selectedDevices);
     let completed = 0;
     
-    ips.forEach(function(ip) {
+    keys.forEach(function(key) {
+      const device = invData.find(d => ndDeviceKey(d) === key || d.ip === key) || {ip: key, mac: key};
       $.ajax({
         url: '/api/netdiscover/overrides/delete',
         type: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ip: ip}),
+        data: JSON.stringify(ndDevicePayload(device)),
         success: function() {
           completed++;
-          if (completed === ips.length) {
+          if (completed === keys.length) {
             selectedDevices.clear();
             updateBulkActions();
             loadInventoryData();
-            alert('Cleared overrides for ' + ips.length + ' device(s)');
+            alert('Cleared overrides for ' + keys.length + ' device(s)');
           }
         },
         error: function(xhr) {
-          console.error('Bulk delete failed for ' + ip, xhr.responseText);
+          console.error('Bulk delete failed for ' + key, xhr.responseText);
         }
       });
     });

@@ -1,6 +1,6 @@
 # NetDiscover for OPNsense
 
-**Version:** 2.0.14  
+**Version:** 2.1.0  
 **Professional network device discovery and inventory management**
 
 ## Overview
@@ -21,7 +21,7 @@ NetDiscover is a comprehensive network device discovery and inventory system for
 
 See **[docs/INSTALL_OPNSENSE.md](docs/INSTALL_OPNSENSE.md)** for installation on OPNsense 26.7+.
 
-Package name after build: `os-netdiscover-2.0.14.pkg`
+Package name after build: `os-netdiscover-2.1.0.pkg`
 
 ## Documentation
 

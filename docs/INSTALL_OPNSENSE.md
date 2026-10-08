@@ -16,8 +16,8 @@ git clone https://github.com/john3morton/os-netdiscover.git netdiscover
 
 cd /usr/plugins/net-mgmt/netdiscover
 make package
-pkg add -f ./work/pkg/os-netdiscover-2.0.14.pkg
-chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/netdiscoverd.py
+pkg add -f ./work/pkg/os-netdiscover-2.1.0.pkg
+chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/*.py /usr/local/etc/rc.d/netdiscoverd
 ```
 
 ## Option B — Sync from your Windows workspace
@@ -32,8 +32,8 @@ ssh root@192.168.3.1 "cd /usr/plugins/net-mgmt/netdiscover && make package"
 Then on the firewall:
 
 ```sh
-pkg add -f ./work/pkg/os-netdiscover-2.0.14.pkg
-chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/netdiscoverd.py
+pkg add -f ./work/pkg/os-netdiscover-2.1.0.pkg
+chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/*.py
 ```
 
 ## Reload templates and restart GUI

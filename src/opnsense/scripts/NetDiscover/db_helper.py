@@ -2,6 +2,7 @@
 """
 SQLite Database Helper for NetDiscover
 Handles all database operations and historical tracking
+v2.1.0 — device identity keyed by MAC
 """
 
 import sqlite3
@@ -13,6 +14,28 @@ from typing import Dict, List, Optional, Any
 DB_DIR = "/var/db/netdiscover"
 DB_FILE = os.path.join(DB_DIR, "netdiscover.db")
 SCHEMA_FILE = "/usr/local/opnsense/scripts/NetDiscover/db_schema.sql"
+
+
+def normalize_mac(mac: str) -> str:
+    if not mac:
+        return ""
+    m = str(mac).strip().lower().replace("-", ":")
+    parts = [p for p in m.split(":") if p != ""]
+    if len(parts) != 6:
+        return m if m.startswith("ip:") else ""
+    try:
+        return ":".join(f"{int(p, 16):02x}" for p in parts)
+    except ValueError:
+        return ""
+
+
+def device_key(mac: str, ip: str) -> str:
+    m = normalize_mac(mac)
+    if m:
+        return m
+    if ip:
+        return f"ip:{ip}"
+    return ""
 
 
 class NetDiscoverDB:
@@ -30,13 +53,11 @@ class NetDiscoverDB:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         
-        # Load schema
         if os.path.exists(SCHEMA_FILE):
             with open(SCHEMA_FILE, 'r') as f:
                 schema = f.read()
                 self.conn.executescript(schema)
         else:
-            # Inline schema if file not found
             self._create_schema()
         
         self.conn.commit()
@@ -45,11 +66,10 @@ class NetDiscoverDB:
         """Fallback schema creation if schema file missing"""
         cur = self.conn.cursor()
         
-        # Devices table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS devices (
-                ip TEXT PRIMARY KEY,
-                mac TEXT,
+                mac TEXT PRIMARY KEY,
+                ip TEXT,
                 hostname TEXT,
                 hostname_override INTEGER DEFAULT 0,
                 vendor TEXT,
@@ -72,10 +92,10 @@ class NetDiscoverDB:
             )
         ''')
         
-        # Device history table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS device_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac TEXT,
                 ip TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 event_type TEXT NOT NULL,
@@ -87,7 +107,6 @@ class NetDiscoverDB:
             )
         ''')
         
-        # Events table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,10 +120,10 @@ class NetDiscoverDB:
             )
         ''')
         
-        # Device overrides table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS device_overrides (
-                ip TEXT PRIMARY KEY,
+                mac TEXT PRIMARY KEY,
+                ip TEXT,
                 hostname TEXT,
                 device_type TEXT,
                 manufacturer TEXT,
@@ -117,10 +136,10 @@ class NetDiscoverDB:
             )
         ''')
         
-        # Indexes
         cur.execute('CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen)')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_history_ip ON device_history(ip, timestamp DESC)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_history_mac ON device_history(mac, timestamp DESC)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_history_timestamp ON device_history(timestamp DESC)')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC)')
         
@@ -131,22 +150,20 @@ class NetDiscoverDB:
             self.conn.close()
     
     def upsert_device(self, device: Dict[str, Any]) -> None:
-        """Insert or update a device, tracking changes in history"""
-        ip = device.get('ip')
-        if not ip:
+        """Insert or update a device by MAC, tracking changes in history"""
+        ip = device.get('ip') or ''
+        key = device_key(device.get('mac') or '', ip)
+        if not key:
             return
         
         now = int(time.time())
-        
-        # Get existing device if any
         cur = self.conn.cursor()
-        cur.execute('SELECT * FROM devices WHERE ip = ?', (ip,))
+        cur.execute('SELECT * FROM devices WHERE mac = ?', (key,))
         existing = cur.fetchone()
         
-        # Prepare device data (v1.5.1 - dhcp type)
         device_data = {
+            'mac': key,
             'ip': ip,
-            'mac': device.get('mac', ''),
             'hostname': device.get('hostname', ''),
             'hostname_override': 1 if device.get('hostname_override') else 0,
             'vendor': device.get('vendor', ''),
@@ -179,31 +196,28 @@ class NetDiscoverDB:
         }
         
         if existing:
-            # Update existing device and track changes
             changes = []
-            for key in ['hostname', 'vendor', 'status', 'device_type', 'manufacturer', 'model', 'interface', 'subnet']:
-                old_val = existing[key] if key in existing.keys() else ''
-                new_val = device_data[key]
+            for field in ['hostname', 'vendor', 'status', 'device_type', 'manufacturer', 'model', 'interface', 'subnet', 'ip']:
+                old_val = existing[field] if field in existing.keys() else ''
+                new_val = device_data[field]
                 if old_val != new_val and new_val:
-                    changes.append((key, old_val, new_val))
+                    changes.append((field, old_val, new_val))
             
-            # Log changes to history
             for field, old_val, new_val in changes:
-                self.add_history(ip, 'attribute_change', field, old_val, new_val)
+                self.add_history(key, ip, 'attribute_change', field, old_val, new_val)
             
-            # Update device (v2.0.0 - topology)
             cur.execute('''
                 UPDATE devices SET
-                    mac=?, hostname=?, hostname_override=?, vendor=?,
+                    ip=?, hostname=?, hostname_override=?, vendor=?,
                     connection_state=?, lifecycle_flags=?, status=?, dhcp_type=?,
                     device_type=?, device_type_source=?, tags=?, manufacturer=?, model=?, os=?,
                     mdns_services=?, open_ports=?, banners=?, snmp_sysname=?, snmp_sysdescr=?,
                     interface=?, subnet=?, last_seen=?, flag_set_time=?, flag_acknowledged=?,
                     connected_to_ap=?, ap_name=?, ap_last_seen=?,
                     notes=?, updated_at=?
-                WHERE ip=?
+                WHERE mac=?
             ''', (
-                device_data['mac'], device_data['hostname'], device_data['hostname_override'],
+                device_data['ip'], device_data['hostname'], device_data['hostname_override'],
                 device_data['vendor'],
                 device_data['connection_state'], device_data['lifecycle_flags'], device_data['status'],
                 device_data['dhcp_type'],
@@ -215,13 +229,12 @@ class NetDiscoverDB:
                 device_data['last_seen'], device_data['flag_set_time'], device_data['flag_acknowledged'],
                 device_data['connected_to_ap'], device_data['ap_name'], device_data['ap_last_seen'],
                 device_data['notes'], device_data['updated_at'],
-                ip
+                key
             ))
         else:
-            # New device - insert (v2.0.0 - topology)
             cur.execute('''
                 INSERT INTO devices (
-                    ip, mac, hostname, hostname_override, vendor,
+                    mac, ip, hostname, hostname_override, vendor,
                     connection_state, lifecycle_flags, status, dhcp_type,
                     device_type, device_type_source, tags, manufacturer, model, os,
                     mdns_services, open_ports, banners, snmp_sysname, snmp_sysdescr,
@@ -231,7 +244,7 @@ class NetDiscoverDB:
                     notes, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                device_data['ip'], device_data['mac'], device_data['hostname'],
+                device_data['mac'], device_data['ip'], device_data['hostname'],
                 device_data['hostname_override'], device_data['vendor'],
                 device_data['connection_state'], device_data['lifecycle_flags'], device_data['status'],
                 device_data['dhcp_type'],
@@ -247,30 +260,30 @@ class NetDiscoverDB:
                 now, now
             ))
             
-            # Log discovery in history
-            self.add_history(ip, 'discovered', None, None, None, 
-                           json.dumps({'mac': device_data['mac'], 'hostname': device_data['hostname']}))
+            self.add_history(key, ip, 'discovered', None, None, None, 
+                           json.dumps({'mac': key, 'hostname': device_data['hostname']}))
         
         self.conn.commit()
     
-    def add_history(self, ip: str, event_type: str, field_name: Optional[str] = None,
+    def add_history(self, mac: str, ip: str, event_type: str, field_name: Optional[str] = None,
                    old_value: Optional[str] = None, new_value: Optional[str] = None,
                    details: Optional[str] = None) -> None:
         """Add an entry to device history"""
         cur = self.conn.cursor()
         cur.execute('''
-            INSERT INTO device_history (ip, timestamp, event_type, field_name, old_value, new_value, details)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (ip, int(time.time()), event_type, field_name, old_value, new_value, details))
+            INSERT INTO device_history (mac, ip, timestamp, event_type, field_name, old_value, new_value, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (mac, ip or '', int(time.time()), event_type, field_name, old_value, new_value, details))
         self.conn.commit()
     
     def add_event(self, event_type: str, ip: str, mac: str = '', hostname: str = '', details: Dict = None) -> None:
         """Add an event to the events table"""
         cur = self.conn.cursor()
+        key = device_key(mac, ip)
         cur.execute('''
             INSERT INTO events (timestamp, event_type, ip, mac, hostname, details)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (int(time.time()), event_type, ip, mac, hostname, json.dumps(details or {})))
+        ''', (int(time.time()), event_type, ip, key, hostname, json.dumps(details or {})))
         self.conn.commit()
     
     def get_all_devices(self) -> List[Dict]:
@@ -282,23 +295,37 @@ class NetDiscoverDB:
         result = []
         for row in rows:
             device = dict(row)
-            # Parse JSON fields
-            device['tags'] = json.loads(device['tags']) if device['tags'] else []
-            device['mdns_services'] = json.loads(device['mdns_services']) if device['mdns_services'] else []
-            device['open_ports'] = json.loads(device['open_ports']) if device['open_ports'] else []
+            device['tags'] = json.loads(device['tags']) if device.get('tags') else []
+            device['mdns_services'] = json.loads(device['mdns_services']) if device.get('mdns_services') else []
+            device['open_ports'] = json.loads(device['open_ports']) if device.get('open_ports') else []
+            # Present synthetic keys as empty MAC in UI consumers
+            if str(device.get('mac') or '').startswith('ip:'):
+                device['id'] = device['mac']
+                device['mac'] = ''
             result.append(device)
         
         return result
     
-    def get_device_history(self, ip: str, limit: int = 100) -> List[Dict]:
-        """Get history for a specific device"""
+    def get_device_history(self, mac: str = '', ip: str = '', limit: int = 100) -> List[Dict]:
+        """Get history for a specific device (prefer MAC)."""
         cur = self.conn.cursor()
-        cur.execute('''
-            SELECT * FROM device_history 
-            WHERE ip = ? 
-            ORDER BY timestamp DESC 
-            LIMIT ?
-        ''', (ip, limit))
+        key = device_key(mac, ip)
+        if key:
+            cur.execute('''
+                SELECT * FROM device_history 
+                WHERE mac = ? OR ip = ?
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (key, ip or '', limit))
+        elif ip:
+            cur.execute('''
+                SELECT * FROM device_history 
+                WHERE ip = ? 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (ip, limit))
+        else:
+            return []
         
         rows = cur.fetchall()
         return [dict(row) for row in rows]
@@ -313,23 +340,26 @@ class NetDiscoverDB:
         for row in rows:
             event = dict(row)
             event['details'] = json.loads(event['details']) if event['details'] else {}
-            # Map timestamp to 'time' for compatibility
             event['time'] = event['timestamp']
             result.append(event)
         
         return result
     
-    def set_override(self, ip: str, hostname: str = None, device_type: str = None,
+    def set_override(self, mac: str = '', ip: str = '', hostname: str = None, device_type: str = None,
                     manufacturer: str = None, model: str = None, os: str = None,
                     location: str = None, tags: str = None, notes: str = None) -> None:
-        """Set or update device overrides (v1.6.3: added os)"""
+        """Set or update device overrides (keyed by MAC)."""
+        key = device_key(mac, ip)
+        if not key:
+            return
         cur = self.conn.cursor()
         now = int(time.time())
         
         cur.execute('''
-            INSERT INTO device_overrides (ip, hostname, device_type, manufacturer, model, os, location, tags, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ip) DO UPDATE SET
+            INSERT INTO device_overrides (mac, ip, hostname, device_type, manufacturer, model, os, location, tags, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mac) DO UPDATE SET
+                ip=excluded.ip,
                 hostname=excluded.hostname,
                 device_type=excluded.device_type,
                 manufacturer=excluded.manufacturer,
@@ -339,20 +369,30 @@ class NetDiscoverDB:
                 tags=excluded.tags,
                 notes=excluded.notes,
                 updated_at=excluded.updated_at
-        ''', (ip, hostname, device_type, manufacturer, model, os, location, tags, notes, now, now))
+        ''', (key, ip, hostname, device_type, manufacturer, model, os, location, tags, notes, now, now))
         
         self.conn.commit()
     
-    def delete_override(self, ip: str) -> None:
+    def delete_override(self, mac: str = '', ip: str = '') -> None:
         """Delete device overrides"""
+        key = device_key(mac, ip)
         cur = self.conn.cursor()
-        cur.execute('DELETE FROM device_overrides WHERE ip = ?', (ip,))
+        if key:
+            cur.execute('DELETE FROM device_overrides WHERE mac = ?', (key,))
+        elif ip:
+            cur.execute('DELETE FROM device_overrides WHERE ip = ?', (ip,))
         self.conn.commit()
     
-    def get_override(self, ip: str) -> Optional[Dict]:
+    def get_override(self, mac: str = '', ip: str = '') -> Optional[Dict]:
         """Get override for a specific device"""
+        key = device_key(mac, ip)
         cur = self.conn.cursor()
-        cur.execute('SELECT * FROM device_overrides WHERE ip = ?', (ip,))
+        if key:
+            cur.execute('SELECT * FROM device_overrides WHERE mac = ?', (key,))
+        elif ip:
+            cur.execute('SELECT * FROM device_overrides WHERE ip = ?', (ip,))
+        else:
+            return None
         row = cur.fetchone()
         return dict(row) if row else None
     
@@ -375,16 +415,22 @@ class NetDiscoverDB:
         cur.execute('SELECT COUNT(*) as up FROM devices WHERE last_seen > ?', (now - 600,))
         up = cur.fetchone()['up']
         
-        cur.execute('SELECT COUNT(*) as new FROM devices WHERE status = "new" AND last_seen > ?', 
-                   (now - 86400,))
+        cur.execute(
+            'SELECT COUNT(*) as new FROM devices WHERE last_seen > ? AND (lifecycle_flags LIKE ? OR status LIKE ?)',
+            (now - 86400, '%new%', '%new%')
+        )
         new = cur.fetchone()['new']
         
-        cur.execute('SELECT COUNT(*) as changed FROM devices WHERE status = "changed" AND last_seen > ?',
-                   (now - 86400,))
+        cur.execute(
+            'SELECT COUNT(*) as changed FROM devices WHERE last_seen > ? AND (lifecycle_flags LIKE ? OR status LIKE ?)',
+            (now - 86400, '%changed%', '%changed%')
+        )
         changed = cur.fetchone()['changed']
         
-        cur.execute('SELECT COUNT(*) as gone FROM devices WHERE status = "gone" AND last_seen > ?',
-                   (now - 86400,))
+        cur.execute(
+            'SELECT COUNT(*) as gone FROM devices WHERE last_seen > ? AND (connection_state = ? OR status LIKE ?)',
+            (now - 86400, 'gone', '%gone%')
+        )
         gone = cur.fetchone()['gone']
         
         return {
@@ -394,4 +440,3 @@ class NetDiscoverDB:
             'changed_24h': changed,
             'gone_24h': gone
         }
-

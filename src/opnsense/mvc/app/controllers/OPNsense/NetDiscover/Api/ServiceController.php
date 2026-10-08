@@ -17,7 +17,7 @@ class ServiceController extends ApiMutableServiceControllerBase
     
     /**
      * Update OUI (MAC vendor) database from IEEE
-     * GET /api/netdiscover/service/updateoui
+     * POST /api/netdiscover/service/updateoui
      */
     public function updateouiAction()
     {
@@ -72,7 +72,7 @@ class ServiceController extends ApiMutableServiceControllerBase
     
     /**
      * Update OUI database using Wireshark extended manuf file
-     * GET /api/netdiscover/service/updatewireshark
+     * POST /api/netdiscover/service/updatewireshark
      */
     public function updatewiresharkAction()
     {

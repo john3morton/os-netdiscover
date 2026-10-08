@@ -27,6 +27,10 @@ class InventoryController extends ApiControllerBase
                 $row['exhaustive_ports'] = json_decode($row['exhaustive_ports'] ?? '[]', true) ?: [];
                 $row['banners'] = json_decode($row['banners'] ?? '{}', true) ?: [];
                 $row['hostname_override'] = (bool)($row['hostname_override'] ?? 0);
+                // Preserve stable id; hide synthetic ip: keys from MAC column
+                $rawMac = $row['mac'] ?? '';
+                $row['id'] = $rawMac;
+                $row['mac'] = DeviceIdentity::displayMac($rawMac);
                 $devices[] = $row;
             }
             
@@ -79,34 +83,42 @@ class InventoryController extends ApiControllerBase
         }
 
         foreach ($devices as &$device) {
+            $mac = strtolower($device['mac'] ?? '');
             $ip = $device['ip'] ?? '';
-            if (isset($overrides[$ip])) {
+            // Prefer MAC-keyed overrides; fall back to legacy IP keys
+            $override = null;
+            if ($mac !== '' && isset($overrides[$mac])) {
+                $override = $overrides[$mac];
+            } elseif ($ip !== '' && isset($overrides[$ip])) {
                 $override = $overrides[$ip];
-                if (isset($override['hostname']) && !empty($override['hostname'])) {
-                    $device['hostname'] = $override['hostname'];
-                    $device['hostname_override'] = true;
-                }
-                if (isset($override['device_type']) && !empty($override['device_type'])) {
-                    $device['device_type'] = $override['device_type'];
-                }
-                if (isset($override['manufacturer']) && !empty($override['manufacturer'])) {
-                    $device['manufacturer'] = $override['manufacturer'];
-                }
-                if (isset($override['model']) && !empty($override['model'])) {
-                    $device['model'] = $override['model'];
-                }
-                if (isset($override['os']) && !empty($override['os'])) {
-                    $device['os'] = $override['os'];
-                }
-                if (isset($override['location']) && !empty($override['location'])) {
-                    $device['location'] = $override['location'];
-                }
-                if (isset($override['tags']) && is_array($override['tags'])) {
-                    $device['tags'] = $override['tags'];
-                }
-                if (isset($override['notes']) && !empty($override['notes'])) {
-                    $device['notes'] = $override['notes'];
-                }
+            }
+            if ($override === null) {
+                continue;
+            }
+            if (isset($override['hostname']) && !empty($override['hostname'])) {
+                $device['hostname'] = $override['hostname'];
+                $device['hostname_override'] = true;
+            }
+            if (isset($override['device_type']) && !empty($override['device_type'])) {
+                $device['device_type'] = $override['device_type'];
+            }
+            if (isset($override['manufacturer']) && !empty($override['manufacturer'])) {
+                $device['manufacturer'] = $override['manufacturer'];
+            }
+            if (isset($override['model']) && !empty($override['model'])) {
+                $device['model'] = $override['model'];
+            }
+            if (isset($override['os']) && !empty($override['os'])) {
+                $device['os'] = $override['os'];
+            }
+            if (isset($override['location']) && !empty($override['location'])) {
+                $device['location'] = $override['location'];
+            }
+            if (isset($override['tags']) && is_array($override['tags'])) {
+                $device['tags'] = $override['tags'];
+            }
+            if (isset($override['notes']) && !empty($override['notes'])) {
+                $device['notes'] = $override['notes'];
             }
         }
         return $devices;
@@ -211,7 +223,7 @@ class InventoryController extends ApiControllerBase
     /**
      * Delete a device from inventory
      * POST /api/netdiscover/inventory/delete
-     * Payload: {"ip": "192.168.1.1"}
+     * Payload: {"mac": "aa:bb:...", "ip": "192.168.1.1"}  (mac preferred)
      */
     public function deleteAction()
     {
@@ -221,9 +233,15 @@ class InventoryController extends ApiControllerBase
                 $payload = $this->request->getPost();
             }
             
+            $mac = isset($payload['mac']) ? strtolower(trim($payload['mac'])) : '';
             $ip = isset($payload['ip']) ? trim($payload['ip']) : '';
-            if (empty($ip)) {
-                return ["result" => "failed", "error" => "IP address required"];
+            if ($mac === '' && $ip === '') {
+                return ["result" => "failed", "error" => "MAC or IP required"];
+            }
+            if ($mac !== '' && str_starts_with($mac, 'ip:')) {
+                // synthetic key from MAC-less hosts
+            } elseif ($mac === '' && $ip !== '') {
+                $mac = 'ip:' . $ip;
             }
             
             // Delete from SQLite
@@ -232,25 +250,28 @@ class InventoryController extends ApiControllerBase
                 $db = new \SQLite3($dbPath, SQLITE3_OPEN_READWRITE);
                 $db->busyTimeout(5000);
                 
-                // Delete device
-                $stmt = $db->prepare('DELETE FROM devices WHERE ip = :ip');
-                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
-                $stmt->execute();
-                
-                // Delete device history
-                $stmt = $db->prepare('DELETE FROM device_history WHERE ip = :ip');
-                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
-                $stmt->execute();
-                
-                // Delete device overrides
-                $stmt = $db->prepare('DELETE FROM device_overrides WHERE ip = :ip');
-                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
-                $stmt->execute();
-                
-                // Delete related events
-                $stmt = $db->prepare('DELETE FROM events WHERE ip = :ip');
-                $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
-                $stmt->execute();
+                // Delete by MAC identity only (avoid deleting a different device that reused the IP)
+                if ($mac !== '') {
+                    $stmt = $db->prepare('DELETE FROM devices WHERE mac = :mac');
+                    $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                    $stmt->execute();
+
+                    $stmt = $db->prepare('DELETE FROM device_history WHERE mac = :mac');
+                    $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                    $stmt->execute();
+
+                    $stmt = $db->prepare('DELETE FROM device_overrides WHERE mac = :mac');
+                    $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                    $stmt->execute();
+
+                    $stmt = $db->prepare('DELETE FROM events WHERE mac = :mac');
+                    $stmt->bindValue(':mac', $mac, SQLITE3_TEXT);
+                    $stmt->execute();
+                } elseif ($ip !== '') {
+                    $stmt = $db->prepare('DELETE FROM devices WHERE ip = :ip');
+                    $stmt->bindValue(':ip', $ip, SQLITE3_TEXT);
+                    $stmt->execute();
+                }
                 
                 $db->close();
             }
@@ -260,14 +281,21 @@ class InventoryController extends ApiControllerBase
             if (file_exists($jsonPath)) {
                 $data = json_decode(file_get_contents($jsonPath), true);
                 if (is_array($data) && isset($data['devices'])) {
-                    $data['devices'] = array_values(array_filter($data['devices'], function($d) use ($ip) {
-                        return ($d['ip'] ?? '') !== $ip;
+                    $data['devices'] = array_values(array_filter($data['devices'], function($d) use ($mac, $ip) {
+                        $dmac = strtolower($d['mac'] ?? '');
+                        $dip = $d['ip'] ?? '';
+                        if ($mac !== '' && ($dmac === $mac || $dmac === '')) {
+                            if ($dmac === $mac) {
+                                return false;
+                            }
+                        }
+                        return $dip !== $ip;
                     }));
                     file_put_contents($jsonPath, json_encode($data, JSON_PRETTY_PRINT));
                 }
             }
             
-            return ["result" => "deleted", "ip" => $ip];
+            return ["result" => "deleted", "mac" => $mac, "ip" => $ip];
         } catch (\Exception $e) {
             error_log("Device delete error: " . $e->getMessage());
             return ["result" => "failed", "error" => $e->getMessage()];
