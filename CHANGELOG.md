@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.14 - Executable Bit Fix
+- **rc.d / scripts**: Source files now carry the git executable bit so `make package` installs `netdiscoverd` and Python helpers as mode 755.
+- Fixes `service netdiscoverd` reporting “does not exist … or is not executable” after a fresh install on OPNsense 26.7.
+
 ## 2.0.13 - OPNsense 26.7 Packaging
 - **Target ABI**: Ready for OPNsense 26.7.x (Python 3.13 / FreeBSD 15.1).
 - **Standard Package Name**: Builds as `os-netdiscover` (removed custom `PLUGIN_PREFIX=opnsense`).
