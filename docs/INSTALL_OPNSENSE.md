@@ -12,7 +12,7 @@ git clone --depth 1 -b stable/26.7 https://github.com/opnsense/plugins.git
 # Clone NetDiscover into the expected path
 mkdir -p /usr/plugins/net-mgmt
 cd /usr/plugins/net-mgmt
-git clone https://github.com/<YOUR_GITHUB_USER>/os-netdiscover.git netdiscover
+git clone https://github.com/john3morton/os-netdiscover.git netdiscover
 
 cd /usr/plugins/net-mgmt/netdiscover
 make package
