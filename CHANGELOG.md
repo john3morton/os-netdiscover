@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.2 - Stop Duplicate Recent-Change Rows
+- Events were re-inserted every scan from the in-memory ring buffer, so one offline/back/changed transition appeared many times.
+- Persist each event once and collapse existing duplicate rows on the next write.
+
 ## 2.1.1 - Dashboard Counter Fixes
 - **New/Changed counts**: Use token-matched `lifecycle_flags` only (no longer `status LIKE '%new%'` which over-counted after migration).
 - **Up count**: Uses `connection_state = online` only (removed `OR last_seen` inflation).

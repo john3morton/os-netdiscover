@@ -730,7 +730,16 @@ def write_to_sqlite(devices: List[Dict], events: List[Dict]):
     events_written = 0
     try:
         cur.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY timestamp DESC LIMIT 1000)")
+        # Collapse rows already duplicated by older builds that re-inserted the ring buffer
+        cur.execute('''
+            DELETE FROM events WHERE id NOT IN (
+                SELECT MIN(id) FROM events
+                GROUP BY timestamp, event_type, IFNULL(ip,''), IFNULL(mac,''), IFNULL(hostname,''), IFNULL(details,'')
+            )
+        ''')
         for evt in events[:100]:
+            if evt.get("_persisted"):
+                continue
             try:
                 # Store real MAC only in events; keep synthetic ip: keys out of the MAC column
                 emac = normalize_mac(evt.get("mac") or "")
@@ -747,6 +756,7 @@ def write_to_sqlite(devices: List[Dict], events: List[Dict]):
                     evt.get("hostname", ""),
                     json.dumps(evt.get("details", {})),
                 ))
+                evt["_persisted"] = True
                 events_written += 1
             except Exception as e:
                 log_error(f"Error writing event: {e}")
@@ -1630,6 +1640,7 @@ def main():
                         ev["details"] = json.loads(ev["details"] or "{}")
                     except Exception:
                         ev["details"] = {}
+                ev["_persisted"] = True
                 events.append(ev)
             rconn.close()
             log_error(f"Rehydrated {len(devs)} devices from SQLite")
