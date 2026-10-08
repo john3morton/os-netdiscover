@@ -418,8 +418,41 @@ def migrate_devices_to_mac_pk(conn) -> bool:
         LEFT JOIN device_overrides o ON d.mac = o.mac
     ''')
 
+    _clear_stale_new_flags(cur, now)
+
     log_error(f"MAC primary-key migration complete: {len(groups)} devices from {len(legacy_rows)} IP rows")
     return True
+
+def _clear_stale_new_flags(cur, now: Optional[int] = None) -> int:
+    """Remove lifecycle 'new' from devices first seen more than 48 hours ago."""
+    now = int(now or time.time())
+    cutoff = now - 172800
+    cleared = 0
+    try:
+        cur.execute('''
+            SELECT mac, lifecycle_flags, connection_state, first_seen FROM devices
+            WHERE first_seen IS NOT NULL AND first_seen > 0 AND first_seen < ?
+              AND lifecycle_flags IS NOT NULL AND lifecycle_flags != ''
+        ''', (cutoff,))
+        rows = cur.fetchall()
+        for row in rows:
+            mac, flags_s, conn, _fs = row[0], row[1], row[2], row[3]
+            flags = [f.strip() for f in (flags_s or "").split(",") if f.strip()]
+            if "new" not in flags:
+                continue
+            flags = [f for f in flags if f != "new"]
+            conn = conn or "online"
+            new_flags = ",".join(flags)
+            new_status = (new_flags + ", " + conn) if new_flags else conn
+            cur.execute(
+                'UPDATE devices SET lifecycle_flags = ?, status = ? WHERE mac = ?',
+                (new_flags, new_status, mac)
+            )
+            cleared += 1
+    except Exception as e:
+        log_error(f"clear stale new flags failed: {e}")
+    return cleared
+
 
 def init_sqlite_db():
     """Initialize SQLite database with schema; migrate IP-keyed DBs to MAC PK."""
@@ -556,6 +589,14 @@ def init_sqlite_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_history_ip ON device_history(ip, timestamp DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_history_mac ON device_history(mac, timestamp DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC)")
+
+    # Always scrub stale "new" flags left over from migration / old IP clones
+    try:
+        n = _clear_stale_new_flags(cur)
+        if n:
+            log_error(f"Cleared stale 'new' flags on {n} devices")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()

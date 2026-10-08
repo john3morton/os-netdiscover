@@ -16,40 +16,44 @@ class DashboardController extends ApiControllerBase
             $db = new \SQLite3($dbPath, SQLITE3_OPEN_READONLY);
             $db->busyTimeout(5000);
 
-            $result = $db->query('SELECT COUNT(*) as cnt FROM devices');
-            $total = $result->fetchArray(SQLITE3_ASSOC)['cnt'];
-
+            $total = (int)$db->querySingle('SELECT COUNT(*) FROM devices');
             $now = time();
-            $stmt = $db->prepare('SELECT COUNT(*) as cnt FROM devices WHERE connection_state = :cs OR last_seen > :ls');
+
+            // Online only (do not OR with last_seen — that inflated Up to Total)
+            $stmt = $db->prepare('SELECT COUNT(*) FROM devices WHERE connection_state = :cs');
             $stmt->bindValue(':cs', 'online', SQLITE3_TEXT);
-            $stmt->bindValue(':ls', $now - 600, SQLITE3_INTEGER);
-            $up = $stmt->execute()->fetchArray(SQLITE3_ASSOC)['cnt'];
+            $up = (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
 
-            // Prefer lifecycle_flags; fall back to composite status for older rows
+            // Token-aware flag match: avoid status LIKE '%new%' matching stale display strings
+            $flagCount = function ($token) use ($db, $now) {
+                $stmt = $db->prepare(
+                    "SELECT COUNT(*) FROM devices
+                     WHERE last_seen > :cutoff
+                       AND (
+                         lifecycle_flags = :exact
+                         OR lifecycle_flags LIKE :prefix
+                         OR lifecycle_flags LIKE :mid
+                         OR lifecycle_flags LIKE :suffix
+                       )"
+                );
+                $stmt->bindValue(':cutoff', $now - 86400, SQLITE3_INTEGER);
+                $stmt->bindValue(':exact', $token, SQLITE3_TEXT);
+                $stmt->bindValue(':prefix', $token . ',%', SQLITE3_TEXT);
+                $stmt->bindValue(':mid', '%,' . $token . ',%', SQLITE3_TEXT);
+                $stmt->bindValue(':suffix', '%,' . $token, SQLITE3_TEXT);
+                return (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
+            };
+
+            $new = $flagCount('new');
+            $changed = $flagCount('changed');
+
             $stmt = $db->prepare(
-                'SELECT COUNT(*) as cnt FROM devices
-                 WHERE last_seen > :cutoff
-                 AND (lifecycle_flags LIKE :flag OR status LIKE :status)'
-            );
-            $stmt->bindValue(':cutoff', $now - 86400, SQLITE3_INTEGER);
-            $stmt->bindValue(':flag', '%new%', SQLITE3_TEXT);
-            $stmt->bindValue(':status', '%new%', SQLITE3_TEXT);
-            $new = $stmt->execute()->fetchArray(SQLITE3_ASSOC)['cnt'];
-
-            $stmt->bindValue(':cutoff', $now - 86400, SQLITE3_INTEGER);
-            $stmt->bindValue(':flag', '%changed%', SQLITE3_TEXT);
-            $stmt->bindValue(':status', '%changed%', SQLITE3_TEXT);
-            $changed = $stmt->execute()->fetchArray(SQLITE3_ASSOC)['cnt'];
-
-            $stmt = $db->prepare(
-                'SELECT COUNT(*) as cnt FROM devices
-                 WHERE last_seen > :cutoff
-                 AND (connection_state = :gone OR status LIKE :status)'
+                'SELECT COUNT(*) FROM devices
+                 WHERE last_seen > :cutoff AND connection_state = :gone'
             );
             $stmt->bindValue(':cutoff', $now - 86400, SQLITE3_INTEGER);
             $stmt->bindValue(':gone', 'gone', SQLITE3_TEXT);
-            $stmt->bindValue(':status', '%gone%', SQLITE3_TEXT);
-            $gone = $stmt->execute()->fetchArray(SQLITE3_ASSOC)['cnt'];
+            $gone = (int)$stmt->execute()->fetchArray(SQLITE3_NUM)[0];
 
             $result = $db->query('SELECT * FROM events ORDER BY timestamp DESC LIMIT 10');
             $events = [];

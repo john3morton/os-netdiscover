@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.1 - Dashboard Counter Fixes
+- **New/Changed counts**: Use token-matched `lifecycle_flags` only (no longer `status LIKE '%new%'` which over-counted after migration).
+- **Up count**: Uses `connection_state = online` only (removed `OR last_seen` inflation).
+- **Stale "new" flags**: Cleared on daemon start for devices first seen > 48h ago (migration leftover).
+
 ## 2.1.0 - MAC Identity + Hardening + Expansion
 - **MAC primary key**: Devices are identified by MAC (synthetic `ip:<addr>` only when MAC unknown). Automatic DB migration dedupes prior IP-keyed clones.
 - **API/UI keyed by MAC**: Overrides, acknowledge, history, delete, and bulk actions prefer MAC; IP retained for scans and display.
