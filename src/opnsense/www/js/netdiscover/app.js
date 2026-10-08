@@ -416,6 +416,13 @@
     if (d.ip) return 'ip:' + d.ip;
     return '';
   }
+  function ndDisplayMac(mac) {
+    // Hide synthetic keys (ip:x.x.x.x) — those are identity, not hardware MACs
+    if (!mac) return '';
+    const m = String(mac);
+    if (m.toLowerCase().indexOf('ip:') === 0) return '';
+    return m;
+  }
   function ndDevicePayload(d) {
     const key = ndDeviceKey(d);
     const payload = { ip: (d && d.ip) || '' };
@@ -990,7 +997,7 @@
       dhcpCell.append(dhcpDot);
       tr.append(dhcpCell);
       
-      tr.append($('<td data-column-id="mac"></td>').text(row.mac || ''));
+      tr.append($('<td data-column-id="mac"></td>').text(ndDisplayMac(row.mac)));
       
       const hostnameCell = $('<td data-column-id="hostname"></td>').text(row.hostname || '');
           if (row.hostname_override) {
@@ -2209,7 +2216,7 @@
       tr.append(typeCell);
       
           tr.append($('<td></td>').text(row.ip || ''));
-          tr.append($('<td></td>').text(row.mac || ''));
+          tr.append($('<td></td>').text(ndDisplayMac(row.mac)));
           tr.append($('<td></td>').text(row.hostname || ''));
           tr.append($('<td></td>').text(JSON.stringify(row.details || {})));
           tbody.append(tr);

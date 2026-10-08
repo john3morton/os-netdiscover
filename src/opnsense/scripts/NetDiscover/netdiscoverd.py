@@ -732,7 +732,10 @@ def write_to_sqlite(devices: List[Dict], events: List[Dict]):
         cur.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY timestamp DESC LIMIT 1000)")
         for evt in events[:100]:
             try:
-                emac = normalize_mac(evt.get("mac") or "") or device_key(evt.get("mac") or "", evt.get("ip") or "")
+                # Store real MAC only in events; keep synthetic ip: keys out of the MAC column
+                emac = normalize_mac(evt.get("mac") or "")
+                if not emac:
+                    emac = ""
                 cur.execute('''
                     INSERT INTO events (timestamp, event_type, ip, mac, hostname, details)
                     VALUES (?, ?, ?, ?, ?, ?)
