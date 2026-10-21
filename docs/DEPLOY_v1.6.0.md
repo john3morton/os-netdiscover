@@ -242,9 +242,9 @@ configctl webgui restart
 - OUI: `/var/db/netdiscover/oui.db`
 
 ### Documentation
-- See `TODO_v1.6.0.md` for remaining features
-- See `SESSION_SUMMARY.md` for complete history
-- See `CHANGELOG.md` for version details
+- See [INSTALL_OPNSENSE.md](INSTALL_OPNSENSE.md) for current install steps
+- See [ROADMAP.md](ROADMAP.md) for planned work
+- See [CHANGELOG.md](../CHANGELOG.md) for version details
 
 ---
 

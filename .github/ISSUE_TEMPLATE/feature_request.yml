@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an enhancement for NetDiscover
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Check [docs/ROADMAP.md](https://github.com/john3morton/os-netdiscover/blob/main/docs/ROADMAP.md) before filing duplicates.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work from a user or operator perspective?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

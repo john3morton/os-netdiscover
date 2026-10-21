@@ -1,0 +1,53 @@
+name: Bug report
+description: Something is broken or behaving incorrectly
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in as much as you can — OPNsense and plugin versions help a lot.
+  - type: input
+    id: opnsense-version
+    attributes:
+      label: OPNsense version
+      placeholder: e.g. 26.7.x
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: NetDiscover / package version
+      placeholder: e.g. 2.1.2 (os-netdiscover-2.1.2.pkg)
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Clear description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / evidence
+      description: Relevant `service netdiscoverd status`, configd lines, or UI screenshots (paste text when possible).
+    validations:
+      required: false
