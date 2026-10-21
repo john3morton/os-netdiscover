@@ -1,6 +1,6 @@
 # NetDiscover for OPNsense
 
-**Version:** 2.1.0  
+**Version:** 2.1.2  
 **Professional network device discovery and inventory management**
 
 ## Overview
@@ -21,7 +21,7 @@ NetDiscover is a comprehensive network device discovery and inventory system for
 
 See **[docs/INSTALL_OPNSENSE.md](docs/INSTALL_OPNSENSE.md)** for installation on OPNsense 26.7+.
 
-Package name after build: `os-netdiscover-2.1.0.pkg`
+Package name after build: `os-netdiscover-2.1.2.pkg`
 
 ## Documentation
 
@@ -92,10 +92,15 @@ Complete documentation available in **[docs/](docs/)** folder:
 - SQLite3
 - Disk space: ~10-50MB (depending on device count)
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test notes and PR expectations.  
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
 ## License
 
 MIT License — see [LICENSE](LICENSE).
 
 ## Support
 
-For issues, feature requests, or questions, open a GitHub issue or see the documentation in the `docs/` folder.
+For issues, feature requests, or questions, open a GitHub issue (use the issue templates) or see the documentation in the `docs/` folder.

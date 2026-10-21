@@ -1,6 +1,6 @@
 <div class="content-box">
   <div class="pull-right">
-    <span class="label label-default" style="margin-right:8px;">v0.0.0</span>
+    <span class="label label-default" style="margin-right:8px;">v2.1.2</span>
     <button class="btn btn-xs btn-primary" id="btn_save"><i class="fa fa-save"></i> Save</button>
     <button class="btn btn-xs btn-default" id="btn_apply"><i class="fa fa-play"></i> Apply</button>
   </div>

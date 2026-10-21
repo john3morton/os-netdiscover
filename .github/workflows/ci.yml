@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Python syntax (compileall)
+        run: python3 -m compileall -q src/opnsense/scripts/NetDiscover
+
+      - name: PHP syntax (php -l)
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do
+            php -l "$f"
+          done < <(find src -name '*.php' -print0)
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Packaging file presence
+        run: |
+          set -euo pipefail
+          test -f Makefile
+          test -f pkg-descr
+          test -f pkg-plist
+          test -f LICENSE
+          test -f README.md
+          # Every non-directive pkg-plist path under src must exist in the tree
+          while read -r line; do
+            case "$line" in
+              ''|@*|\#*) continue ;;
+            esac
+            rel=${line#/usr/local/}
+            test -e "src/${rel}" || { echo "missing for pkg-plist: $line -> src/${rel}"; exit 1; }
+          done < pkg-plist

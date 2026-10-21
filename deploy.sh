@@ -1,8 +1,9 @@
 #!/bin/sh
 set -euo pipefail
 
-# Paths
-REPO_DIR="/usr/local/src/plugins/net-mgmt/os-netdiscover"
+# Paths — alternate to /usr/plugins/net-mgmt/netdiscover (see docs/INSTALL_OPNSENSE.md).
+# Override when needed: REPO_DIR=/path/to/checkout ./deploy.sh
+REPO_DIR="${REPO_DIR:-/usr/local/src/plugins/net-mgmt/os-netdiscover}"
 PKG_GLOB="work/pkg/os-netdiscover-*.pkg"
 
 echo "==> Building package"

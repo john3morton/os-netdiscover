@@ -56,7 +56,7 @@ def guess_device_type_from_hostname(hostname: str) -> Optional[str]:
     # NAS/Storage
     if 'nas' in h or 'synology' in h or 'qnap' in h:
         return 'NAS'
-    if 'diskstation' in h or 'ds\d+' in h:
+    if 'diskstation' in h or re.search(r'ds\d+', h):
         return 'Synology NAS'
     
     # Cameras

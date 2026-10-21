@@ -16,25 +16,37 @@ git clone https://github.com/john3morton/os-netdiscover.git netdiscover
 
 cd /usr/plugins/net-mgmt/netdiscover
 make package
-pkg add -f ./work/pkg/os-netdiscover-2.1.0.pkg
-chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/*.py /usr/local/etc/rc.d/netdiscoverd
+pkg add -f ./work/pkg/os-netdiscover-2.1.2.pkg
+chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/*.py
 ```
 
-## Option B — Sync from your Windows workspace
+After `make package`, confirm the exact filename with:
 
 ```sh
-# From Windows (PowerShell / WSL), adjust host IP as needed:
-scp -r "D:/workspace/personal/os-netdiscover-opnsense-plugin/"* root@192.168.3.1:/usr/plugins/net-mgmt/netdiscover/
+ls -la ./work/pkg/os-netdiscover-*.pkg
+```
 
-ssh root@192.168.3.1 "cd /usr/plugins/net-mgmt/netdiscover && make package"
+## Option B — Sync from a development machine
+
+Copy the plugin tree into the plugins checkout on the firewall (adjust host and paths):
+
+```sh
+# Example: from your workstation
+scp -r ./os-netdiscover/* root@<firewall-host>:/usr/plugins/net-mgmt/netdiscover/
+
+ssh root@<firewall-host> "cd /usr/plugins/net-mgmt/netdiscover && make package"
 ```
 
 Then on the firewall:
 
 ```sh
-pkg add -f ./work/pkg/os-netdiscover-2.1.0.pkg
+pkg add -f ./work/pkg/os-netdiscover-2.1.2.pkg
 chmod 755 /usr/local/etc/rc.d/netdiscoverd /usr/local/opnsense/scripts/NetDiscover/*.py
 ```
+
+### Alternate layout used by `deploy.sh`
+
+Some hosts keep plugins under `/usr/local/src/plugins/net-mgmt/os-netdiscover`. If you use [`deploy.sh`](../deploy.sh), set or match its `REPO_DIR` to that location; the packaging steps (`make package`, `pkg add`) are the same.
 
 ## Reload templates and restart GUI
 
